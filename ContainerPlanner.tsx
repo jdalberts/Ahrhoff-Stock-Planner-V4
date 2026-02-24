@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
-import { Settings } from '../types';
-import { FORECAST_METHODS, LOW_STOCK_RULES } from '../constants';
-import { db } from '../db';
+import { Settings } from './types';
+import { FORECAST_METHODS, LOW_STOCK_RULES } from './constants';
+import { db } from './db';
 import { Save, Download, Upload, Sliders, Bell, Share2, Info, CheckCircle, AlertTriangle } from 'lucide-react';
 
 interface Props {
@@ -12,6 +12,7 @@ interface Props {
 const SettingsPage: React.FC<Props> = ({ settings, onUpdate }) => {
   // FIX (Issue 6): Inline toast instead of browser alert()
   const [toast, setToast] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+  const [isResetting, setIsResetting] = useState(false);
 
   const showToast = (type: 'success' | 'error', text: string) => {
     setToast({ type, text });
@@ -77,6 +78,24 @@ const SettingsPage: React.FC<Props> = ({ settings, onUpdate }) => {
     reader.readAsText(file);
     // Reset input so the same file can be selected again
     e.target.value = '';
+  };
+
+  const resetToBlankSlate = async () => {
+    const ok = window.confirm('Are you sure? This will clear ALL locally stored data (items, lots, sales, alerts, imports, and settings).');
+    if (!ok) return;
+
+    setIsResetting(true);
+    try {
+      for (const store of ['items', 'lots', 'sales', 'stockCounts', 'alerts', 'salesTransactions', 'settings']) {
+        await db.clear(store);
+      }
+      showToast('success', 'Blank slate complete. Reloading...');
+      setTimeout(() => window.location.reload(), 1200);
+    } catch (err) {
+      console.error(err);
+      showToast('error', 'Failed to reset to blank slate.');
+      setIsResetting(false);
+    }
   };
 
   return (
@@ -266,6 +285,14 @@ const SettingsPage: React.FC<Props> = ({ settings, onUpdate }) => {
             Restore from JSON
             <input type="file" className="hidden" accept=".json" onChange={handleImport} />
           </label>
+          <button
+            onClick={resetToBlankSlate}
+            disabled={isResetting}
+            className="flex items-center px-6 py-3 bg-red-600 hover:bg-red-700 text-white font-bold rounded-xl transition-colors disabled:opacity-60 disabled:cursor-not-allowed"
+          >
+            <AlertTriangle className="mr-2" size={20} />
+            {isResetting ? 'Resetting...' : 'Blank Slate'}
+          </button>
         </div>
       </div>
     </div>

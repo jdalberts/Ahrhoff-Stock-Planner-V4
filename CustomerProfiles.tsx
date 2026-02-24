@@ -1,5 +1,5 @@
 import React from 'react';
-import { ItemPlanningView, Settings } from '../types';
+import { ItemPlanningView, Settings } from './types';
 import { AlertTriangle, TrendingDown, ShoppingCart, Clock, Bell } from 'lucide-react';
 
 interface Props {

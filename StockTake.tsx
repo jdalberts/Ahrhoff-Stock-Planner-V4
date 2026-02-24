@@ -1,7 +1,8 @@
-import React from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { AlertTriangle, Package, Users, TrendingUp, ArrowRight } from 'lucide-react';
-import { SalesTransaction } from '../types';
-import { RAW_SALES, CURRENT_STOCK, SHELF_LIVES, LEAD_TIME_WEEKS, KG_PER_PALLET } from '../salesData';
+import { Item, InventoryLot, SalesHistory, SalesTransaction } from './types';
+import { LEAD_TIME_WEEKS, KG_PER_PALLET } from './productCatalog';
+import { db } from './db';
 
 // ── Types ──
 interface ProductSummary {
@@ -23,32 +24,34 @@ function fmtKg(v: number): string {
   return Math.round(v) + ' kg';
 }
 
-function getMonth(d: string): string { return d.substring(0, 7); }
-
-function buildProducts(): ProductSummary[] {
-  const allNames = [...new Set(RAW_SALES.map(s => s.product))];
-  const allMonths = [...new Set(RAW_SALES.map(s => getMonth(s.date)))].sort();
-  const numMonths = allMonths.length || 1;
+function buildProducts(items: Item[], lots: InventoryLot[], sales: SalesHistory[]): ProductSummary[] {
   const leadTimeDays = LEAD_TIME_WEEKS * 7;
   const reorderPointDays = leadTimeDays + 14;
 
-  return allNames.map(name => {
-    const totalSold = RAW_SALES.filter(s => s.product === name).reduce((a, b) => a + b.qty, 0);
+  return items.map(item => {
+    const itemSales = sales.filter(s => s.itemId === item.id);
+    const uniqueMonths = [...new Set(itemSales.map(s => s.month))];
+    const numMonths = uniqueMonths.length || 1;
+    const totalSold = itemSales.reduce((acc, row) => acc + Number(row.quantitySold || 0), 0);
     const avgMonthly = totalSold / numMonths;
     const dailyDemand = avgMonthly / 30.4;
-    const stock = CURRENT_STOCK[name] || 0;
+    const stock = lots
+      .filter(l => l.itemId === item.id && l.status === 'available')
+      .reduce((acc, lot) => acc + Number(lot.quantityRemaining || 0), 0);
     const daysCover = dailyDemand > 0 ? Math.min(stock / dailyDemand, 999) : 999;
-    const shelfLife = SHELF_LIVES[name] || 365;
+    const shelfLife = item.shelfLifeDays || 365;
 
     let status: ProductSummary['status'] = 'on_track';
     if (daysCover < leadTimeDays) status = 'overdue';
     else if (daysCover < reorderPointDays) status = 'due_soon';
 
     return {
-      name, stock, shelfLife,
+      name: item.name,
+      stock,
+      shelfLife,
       shelfLifeMonths: Math.round(shelfLife / 30),
       totalSold, avgMonthly, dailyDemand, daysCover, status,
-      category: name.startsWith('Browser') ? 'Browser' : name.startsWith('Clex') ? 'Clex' : 'Segawean',
+      category: item.category,
     };
   }).sort((a, b) => a.daysCover - b.daysCover);
 }
@@ -75,15 +78,62 @@ interface Props {
 }
 
 const ReorderRadar: React.FC<Props> = ({ setActiveTab }) => {
-  const products = buildProducts();
+  const [items, setItems] = useState<Item[]>([]);
+  const [lots, setLots] = useState<InventoryLot[]>([]);
+  const [sales, setSales] = useState<SalesHistory[]>([]);
+  const [salesTransactions, setSalesTransactions] = useState<SalesTransaction[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    const loadData = async () => {
+      try {
+        const [dbItems, dbLots, dbSales, dbSalesTransactions] = await Promise.all([
+          db.getAll<Item>('items'),
+          db.getAll<InventoryLot>('lots'),
+          db.getAll<SalesHistory>('sales'),
+          db.getAll<SalesTransaction>('salesTransactions'),
+        ]);
+        setItems(dbItems);
+        setLots(dbLots);
+        setSales(dbSales);
+        setSalesTransactions(dbSalesTransactions);
+      } catch (err) {
+        console.error('Failed to load radar data.', err);
+      } finally {
+        setLoading(false);
+      }
+    };
+
+    loadData();
+  }, []);
+
+  const products = useMemo(() => buildProducts(items, lots, sales), [items, lots, sales]);
   const overdue = products.filter(p => p.status === 'overdue');
   const dueSoon = products.filter(p => p.status === 'due_soon');
   const onTrack = products.filter(p => p.status === 'on_track');
   const lowStock = products.filter(p => p.daysCover < 90);
   const totalStock = products.reduce((a, b) => a + b.stock, 0);
   const totalMonthlyDemand = products.reduce((a, b) => a + b.avgMonthly, 0);
-  const customerCount = new Set(RAW_SALES.map(s => s.customer)).size;
+  const customerCount = new Set(salesTransactions.map(s => s.customer)).size;
   const alertCount = overdue.length + dueSoon.length;
+
+  if (loading) {
+    return <div className="text-slate-500">Loading Reorder Radar...</div>;
+  }
+
+  if (products.length === 0) {
+    return (
+      <div className="space-y-6">
+        <div>
+          <h2 className="text-3xl font-bold text-slate-800 mb-2">Reorder Radar</h2>
+          <p className="text-slate-500">No inventory data loaded yet.</p>
+        </div>
+        <div className="bg-white rounded-2xl border border-slate-200 p-8 text-slate-500">
+          Blank slate active. Import stock and sales data to generate reorder insights.
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-8">

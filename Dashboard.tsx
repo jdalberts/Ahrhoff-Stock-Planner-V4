@@ -1,13 +1,13 @@
-import React, { useState, useRef } from 'react';
-import { Item, InventoryLot, SalesHistory } from '../types';
-import { db } from '../db';
+import React, { useState, useRef, useEffect } from 'react';
+import { Item, InventoryLot, SalesHistory, SalesTransaction } from './types';
+import { db } from './db';
 import {
   findProductTemplate,
   normalizeName,
   detectCategory,
   parsePackSize,
   isSalesSkipRow,
-} from '../productCatalog';
+} from './index';
 import {
   Upload,
   FileSpreadsheet,
@@ -37,6 +37,24 @@ function generateSKU(name: string, category: string): string {
   return `${prefix}-${suffix}-${num}`;
 }
 
+function parseNum(v: any): number {
+  const s = String(v || '0').replace(/[R,\s%]/g, '');
+  return parseFloat(s) || 0;
+}
+
+function parseDate(v: any): string {
+  if (v === null || v === undefined || v === '') return '';
+  if (typeof v === 'number' && Number.isFinite(v)) {
+    const excelEpoch = new Date(Date.UTC(1899, 11, 30));
+    const dt = new Date(excelEpoch.getTime() + v * 86400000);
+    return dt.toISOString().split('T')[0];
+  }
+  const txt = String(v).trim();
+  const maybe = new Date(txt);
+  if (!Number.isNaN(maybe.getTime())) return maybe.toISOString().split('T')[0];
+  return '';
+}
+
 // ── Parsed row types ─────────────────────────────────────────
 interface ParsedStockItem {
   name: string;
@@ -51,6 +69,8 @@ interface ParsedStockItem {
 
 interface ParsedSalesRow {
   name: string;
+  customer: string;
+  saleDate: string;
   matched: boolean;
   quantity: number;
   amount: number;
@@ -65,6 +85,7 @@ interface ImportResult {
   itemsCreated: number;
   lotsCreated: number;
   salesCreated: number;
+  salesTransactionsCreated: number;
   skippedRows: number;
   existingItems: number;
 }
@@ -98,6 +119,7 @@ const ExcelImport: React.FC<ExcelImportProps> = ({ items, lots, sales, onRefresh
   const [toast, setToast] = useState<{ type: 'success' | 'error' | 'warning'; text: string } | null>(null);
   const [result, setResult] = useState<ImportResult | null>(null);
   const [parseError, setParseError] = useState('');
+  const [importedCustomerTxCount, setImportedCustomerTxCount] = useState<number | null>(null);
 
   const fileRef = useRef<HTMLInputElement>(null);
 
@@ -116,7 +138,59 @@ const ExcelImport: React.FC<ExcelImportProps> = ({ items, lots, sales, onRefresh
     setSalesDateRange('');
     setResult(null);
     setParseError('');
+    setImportedCustomerTxCount(null);
     if (fileRef.current) fileRef.current.value = '';
+  };
+
+  useEffect(() => {
+    const loadImportedCustomerCount = async () => {
+      if (step !== 'done' || mode !== 'sales') {
+        setImportedCustomerTxCount(null);
+        return;
+      }
+      try {
+        const imported = await db.getAll<SalesTransaction>('salesTransactions');
+        setImportedCustomerTxCount(imported.length);
+      } catch {
+        setImportedCustomerTxCount(null);
+      }
+    };
+
+    loadImportedCustomerCount();
+  }, [step, mode, result]);
+
+  const clearSelectedStockRows = () => {
+    setStockRows(prev => prev.map(row => (row.skip ? row : { ...row, skip: true })));
+  };
+
+  const selectAllStockRows = () => {
+    setStockRows(prev => prev.map(row => (row.skip ? { ...row, skip: false } : row)));
+  };
+
+  const clearSelectedSalesRows = () => {
+    setSalesRows(prev => prev.map(row => (row.skip ? row : { ...row, skip: true })));
+  };
+
+  const selectAllSalesRows = () => {
+    setSalesRows(prev => prev.map(row => (row.skip ? { ...row, skip: false } : row)));
+  };
+
+  const clearImportedCustomerTransactions = async () => {
+    const ok = window.confirm('Clear all imported customer transactions now?');
+    if (!ok) return;
+
+    try {
+      const imported = await db.getAll<SalesTransaction>('salesTransactions');
+      for (const tx of imported) {
+        if (tx.id) {
+          await db.delete('salesTransactions', tx.id);
+        }
+      }
+      setImportedCustomerTxCount(0);
+      showToast('success', 'Imported customer transaction data cleared.');
+    } catch (err: any) {
+      showToast('error', `Failed to clear imported customer data: ${err.message || 'Unknown error'}`);
+    }
   };
 
   // ════════════════════════════════════════════════════════════
@@ -211,7 +285,7 @@ const ExcelImport: React.FC<ExcelImportProps> = ({ items, lots, sales, onRefresh
         }
       }
 
-      // Find data header row (contains "Quantity" and "Amount")
+      // Find data header row (contains Quantity and Amount)
       let headerIdx = -1;
       for (let i = 0; i < Math.min(raw.length, 10); i++) {
         const cells = (raw[i] || []).map((c: any) => String(c).toLowerCase());
@@ -226,10 +300,21 @@ const ExcelImport: React.FC<ExcelImportProps> = ({ items, lots, sales, onRefresh
         return;
       }
 
+      const headers = (raw[headerIdx] || []).map((c: any) => String(c).toLowerCase().trim());
+      const findCol = (candidates: string[]) => headers.findIndex(h => candidates.some(c => h.includes(c)));
+
+      const productCol = findCol(['product/service', 'product', 'service']);
+      const qtyCol = findCol(['quantity', 'qty']);
+      const amountCol = findCol(['amount', 'total']);
+      const avgPriceCol = findCol(['average price', 'avg price', 'unit price', 'price']);
+      const marginCol = findCol(['gross margin', 'margin']);
+      const customerCol = findCol(['customer', 'contact', 'client']);
+      const dateCol = findCol(['date']);
+
       const parsed: ParsedSalesRow[] = [];
       for (let i = headerIdx + 1; i < raw.length; i++) {
         const row = raw[i];
-        const name = String(row[0] || '').trim();
+        const name = String(row[productCol >= 0 ? productCol : 0] || '').trim();
         if (!name) continue;
         // Stop at TOTAL row
         if (name.toUpperCase() === 'TOTAL') break;
@@ -237,18 +322,15 @@ const ExcelImport: React.FC<ExcelImportProps> = ({ items, lots, sales, onRefresh
         const isService = isSalesSkipRow(name);
         const template = findProductTemplate(name);
 
-        const parseNum = (v: any) => {
-          const s = String(v || '0').replace(/[R,\s%]/g, '');
-          return parseFloat(s) || 0;
-        };
-
         parsed.push({
           name: normalizeName(name),
+          customer: customerCol >= 0 ? normalizeName(String(row[customerCol] || '')) : '',
+          saleDate: dateCol >= 0 ? parseDate(row[dateCol]) : '',
           matched: !!template,
-          quantity: parseNum(row[1]),
-          amount: parseNum(row[2]),
-          avgPrice: parseNum(row[4]),
-          grossMarginPct: parseNum(row[7]),
+          quantity: parseNum(row[qtyCol >= 0 ? qtyCol : 1]),
+          amount: parseNum(row[amountCol >= 0 ? amountCol : 2]),
+          avgPrice: parseNum(row[avgPriceCol >= 0 ? avgPriceCol : 4]),
+          grossMarginPct: parseNum(row[marginCol >= 0 ? marginCol : 7]),
           skip: isService,
           isServiceRow: isService,
         });
@@ -350,6 +432,7 @@ const ExcelImport: React.FC<ExcelImportProps> = ({ items, lots, sales, onRefresh
     setSaving(true);
     let itemsCreated = 0;
     let salesCreated = 0;
+    let salesTransactionsCreated = 0;
     let skippedRows = 0;
     let existingItems = 0;
 
@@ -378,11 +461,18 @@ const ExcelImport: React.FC<ExcelImportProps> = ({ items, lots, sales, onRefresh
         }
       }
 
+      const salesCache = [...sales];
+      const itemsCache = [...items];
+      const existingTransactions = await db.getAll<SalesTransaction>('salesTransactions');
+      const existingTxKeys = new Set(
+        existingTransactions.map(t => `${normalizeName(t.product).toLowerCase()}|${normalizeName(t.customer).toLowerCase()}|${t.date}|${Number(t.qty)}`)
+      );
+
       const activeRows = salesRows.filter(r => !r.skip);
 
       for (const row of activeRows) {
         // Find or create the item
-        let existing = items.find(
+        let existing = itemsCache.find(
           i => normalizeName(i.name).toLowerCase() === row.name.toLowerCase()
         );
 
@@ -408,8 +498,7 @@ const ExcelImport: React.FC<ExcelImportProps> = ({ items, lots, sales, onRefresh
           await db.put('items', newItem);
           itemsCreated++;
           itemId = newItem.id;
-          // Re-fetch so subsequent lookups work
-          items = [...items, newItem];
+          itemsCache.push(newItem);
         }
 
         // Create monthly sales records
@@ -423,7 +512,7 @@ const ExcelImport: React.FC<ExcelImportProps> = ({ items, lots, sales, onRefresh
           const mk = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
 
           // Check if sales record already exists for this item + month
-          const existingSale = sales.find(s => s.itemId === itemId && s.month === mk);
+          const existingSale = salesCache.find(s => s.itemId === itemId && s.month === mk);
           if (existingSale) continue;
 
           const newSale: SalesHistory = {
@@ -433,13 +522,34 @@ const ExcelImport: React.FC<ExcelImportProps> = ({ items, lots, sales, onRefresh
             quantitySold: monthlyQty,
           };
           await db.put('sales', newSale);
+          salesCache.push(newSale);
           salesCreated++;
+        }
+
+        if (row.customer && row.saleDate && row.quantity > 0) {
+          const txDate = row.saleDate;
+          const txPrice = row.avgPrice > 0 ? row.avgPrice : (row.quantity > 0 ? row.amount / row.quantity : 0);
+          const key = `${normalizeName(row.name).toLowerCase()}|${normalizeName(row.customer).toLowerCase()}|${txDate}|${Number(row.quantity)}`;
+
+          if (!existingTxKeys.has(key)) {
+            const tx: SalesTransaction = {
+              id: uid(),
+              product: row.name,
+              customer: row.customer,
+              date: txDate,
+              qty: row.quantity,
+              pricePerKg: txPrice,
+            };
+            await db.put('salesTransactions', tx);
+            existingTxKeys.add(key);
+            salesTransactionsCreated++;
+          }
         }
       }
 
       skippedRows += salesRows.filter(r => r.skip).length;
       await onRefresh();
-      setResult({ type: 'sales', itemsCreated, lotsCreated: 0, salesCreated, skippedRows, existingItems });
+      setResult({ type: 'sales', itemsCreated, lotsCreated: 0, salesCreated, salesTransactionsCreated, skippedRows, existingItems });
       setStep('done');
       showToast('success', `Sales import complete! ${salesCreated} monthly records created across ${months} months.`);
     } catch (err: any) {
@@ -711,6 +821,20 @@ const ExcelImport: React.FC<ExcelImportProps> = ({ items, lots, sales, onRefresh
               <><CheckCircle size={18} className="mr-2" />Import {total} Products</>
             )}
           </button>
+          <button
+            onClick={clearSelectedStockRows}
+            disabled={saving || total === 0}
+            className="px-6 py-3 text-amber-700 bg-amber-50 border border-amber-200 rounded-xl font-medium text-sm hover:bg-amber-100 disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            Clear Selected
+          </button>
+          <button
+            onClick={selectAllStockRows}
+            disabled={saving || stockRows.every(r => !r.skip)}
+            className="px-6 py-3 text-slate-700 bg-slate-50 border border-slate-200 rounded-xl font-medium text-sm hover:bg-slate-100 disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            Restore All
+          </button>
           <button onClick={resetAll} className="px-6 py-3 text-slate-600 font-medium text-sm hover:text-slate-800">
             Cancel
           </button>
@@ -852,6 +976,20 @@ const ExcelImport: React.FC<ExcelImportProps> = ({ items, lots, sales, onRefresh
               <><CheckCircle size={18} className="mr-2" />Import {products.length} Products' Sales</>
             )}
           </button>
+          <button
+            onClick={clearSelectedSalesRows}
+            disabled={saving || salesRows.every(r => r.skip)}
+            className="px-6 py-3 text-amber-700 bg-amber-50 border border-amber-200 rounded-xl font-medium text-sm hover:bg-amber-100 disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            Clear Selected
+          </button>
+          <button
+            onClick={selectAllSalesRows}
+            disabled={saving || salesRows.every(r => !r.skip)}
+            className="px-6 py-3 text-slate-700 bg-slate-50 border border-slate-200 rounded-xl font-medium text-sm hover:bg-slate-100 disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            Restore All
+          </button>
           <button onClick={resetAll} className="px-6 py-3 text-slate-600 font-medium text-sm hover:text-slate-800">
             Cancel
           </button>
@@ -904,6 +1042,12 @@ const ExcelImport: React.FC<ExcelImportProps> = ({ items, lots, sales, onRefresh
                 <span className="font-bold text-blue-700">{result.salesCreated}</span>
               </div>
             )}
+              {result.salesTransactionsCreated > 0 && (
+                <div className="flex justify-between py-2 border-b border-slate-100">
+                  <span className="text-slate-600">Customer transactions created</span>
+                  <span className="font-bold text-blue-700">{result.salesTransactionsCreated}</span>
+                </div>
+              )}
             {result.skippedRows > 0 && (
               <div className="flex justify-between py-2 border-b border-slate-100">
                 <span className="text-slate-600">Rows skipped</span>
@@ -919,6 +1063,15 @@ const ExcelImport: React.FC<ExcelImportProps> = ({ items, lots, sales, onRefresh
             >
               {isStock ? 'Import Sales Data Next' : 'Import More Data'}
             </button>
+            {!isStock && (
+              <button
+                onClick={clearImportedCustomerTransactions}
+                disabled={importedCustomerTxCount !== null && importedCustomerTxCount === 0}
+                className="w-full px-6 py-3 text-amber-700 bg-amber-50 border border-amber-200 rounded-xl font-medium text-sm hover:bg-amber-100 disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                Clear Imported Customer Data{importedCustomerTxCount !== null ? ` (${importedCustomerTxCount})` : ''}
+              </button>
+            )}
             <p className="text-center text-xs text-slate-400">
               Check the {isStock ? 'Product Master and Inventory' : 'Sales Entry'} pages to verify your data.
             </p>

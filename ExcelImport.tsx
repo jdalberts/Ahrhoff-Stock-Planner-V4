@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
-import { InventoryAlert, Item, Settings, ItemPlanningView } from '../types';
-import { db } from '../db';
+import { InventoryAlert, Item, Settings, ItemPlanningView } from './types';
+import { db } from './db';
 import { Bell, MessageCircle, Check, X, Send, CheckCircle, AlertTriangle } from 'lucide-react';
 
 interface Props {

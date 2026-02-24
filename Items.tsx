@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
-import { InventoryLot, Item, StockCountEntry } from '../types';
-import { COUNT_REASONS } from '../constants';
-import { db } from '../db';
+import { InventoryLot, Item, StockCountEntry } from './types';
+import { COUNT_REASONS } from './constants';
+import { db } from './db';
 import { ClipboardCheck, Save, Search, CheckCircle } from 'lucide-react';
 
 interface Props {

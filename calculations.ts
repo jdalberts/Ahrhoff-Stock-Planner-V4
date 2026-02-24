@@ -1,128 +1,127 @@
+import { InventoryAlert, InventoryLot, Item, ItemPlanningView, SalesHistory, Settings } from './types';
 
-/**
- * Item defines the product master data. 
- * COMMENT: It represents the specification of what we sell/stock, not the physical quantity.
- */
-export interface Item {
-  id: string;
-  skuCode: string;
-  name: string;
-  category: 'Clex' | 'Browser' | 'Segawean' | 'Other';
-  packSize: number; // e.g., 25 for 25kg bags
-  leadTimeDays: number;
-  moq: number; // Minimum Order Quantity
-  costPerUnit: number;
-  notes?: string;
-  // ADDED: shelfLifeDays defines product freshness lifetime in days (e.g., 180, 365)
-  shelfLifeDays?: number;
+const toNumber = (value: unknown, fallback = 0): number => {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : fallback;
+};
+
+const daysUntil = (dateIso: string): number => {
+  const target = new Date(dateIso);
+  const now = new Date();
+  const diff = target.getTime() - now.getTime();
+  return Math.floor(diff / (1000 * 60 * 60 * 24));
+};
+
+const monthlyDemand = (sales: SalesHistory[], itemId: string, settings: Settings): number => {
+  const rows = sales
+    .filter(s => s.itemId === itemId)
+    .sort((a, b) => a.month.localeCompare(b.month))
+    .slice(-6);
+
+  if (rows.length === 0) return 0;
+
+  if (settings.forecastMethod === 'weightedAverage' && settings.weights.length >= rows.length) {
+    const weights = settings.weights.slice(-rows.length);
+    const weighted = rows.reduce((sum, row, idx) => sum + toNumber(row.quantitySold) * weights[idx], 0);
+    const totalWeight = weights.reduce((sum, weight) => sum + toNumber(weight), 0);
+    if (totalWeight > 0) return weighted / totalWeight;
+  }
+
+  const total = rows.reduce((sum, row) => sum + toNumber(row.quantitySold), 0);
+  return total / rows.length;
+};
+
+export function calculateItemPlanning(
+  item: Item,
+  allLots: InventoryLot[],
+  allSales: SalesHistory[],
+  settings: Settings
+): ItemPlanningView {
+  const lots = allLots.filter(l => l.itemId === item.id);
+  const sales = allSales.filter(s => s.itemId === item.id);
+
+  const availableStock = lots
+    .filter(l => l.status === 'available')
+    .reduce((sum, lot) => sum + Math.max(0, toNumber(lot.quantityRemaining)), 0);
+
+  const avgMonthlyDemand = monthlyDemand(allSales, item.id, settings);
+  const dailyDemand = avgMonthlyDemand > 0 ? avgMonthlyDemand / 30 : 0;
+  const safetyStock = dailyDemand * toNumber(settings.safetyStockDays);
+  const leadTimeDays = toNumber(item.leadTimeDays, settings.defaultLeadTimeDays);
+  const reorderPoint = dailyDemand * leadTimeDays + safetyStock;
+  const reviewDemand = dailyDemand * toNumber(settings.reviewPeriodDays);
+
+  let suggestedOrderQty = Math.max(0, reorderPoint + reviewDemand - availableStock);
+  const itemMoq = Math.max(1, toNumber(item.moq, 1));
+  if (suggestedOrderQty > 0) {
+    suggestedOrderQty = Math.ceil(suggestedOrderQty / itemMoq) * itemMoq;
+  }
+
+  const daysCover = dailyDemand > 0 ? availableStock / dailyDemand : Number.POSITIVE_INFINITY;
+
+  const expiringSoonLots = lots.filter(lot => {
+    if (!lot.expiryDate || lot.status !== 'available') return false;
+    const days = daysUntil(lot.expiryDate);
+    return days >= 0 && days <= settings.expiryWarningDays;
+  });
+
+  const lowStockFlag = settings.lowStockRule === 'belowReorderPoint'
+    ? availableStock < reorderPoint
+    : daysCover < settings.lowStockDaysCoverThreshold;
+
+  const projectedDaysCoverAfterOrder = dailyDemand > 0
+    ? (availableStock + suggestedOrderQty) / dailyDemand
+    : Number.POSITIVE_INFINITY;
+
+  return {
+    item,
+    lots,
+    sales,
+    availableStock,
+    avgMonthlyDemand,
+    dailyDemand,
+    safetyStock,
+    reorderPoint,
+    suggestedOrderQty,
+    projectedDaysCoverAfterOrder,
+    daysCover,
+    lowStockFlag,
+    expiringSoonLots,
+  };
 }
 
-/**
- * Inventory Lot tracks the physical batches. 
- * COMMENT: Added quantityReceived to match upgrade requirements.
- */
-export interface InventoryLot {
-  id: string;
-  itemId: string;
-  lotNumber: string;
-  expiryDate: string | null; // Optional ISO Date
-  quantityRemaining: number;
-  receivedDate: string | null; // Optional ISO Date
-  quantityReceived?: number | null; // New field for total intake tracking
-  status: 'available' | 'expired' | 'damaged';
-  notes?: string;
-}
+export function detectAlerts(
+  planningViews: ItemPlanningView[],
+  _existingAlerts: InventoryAlert[],
+  _settings: Settings
+): InventoryAlert[] {
+  const nowIso = new Date().toISOString();
 
-/**
- * Stock Count Entry for auditing.
- */
-export interface StockCountEntry {
-  id: string;
-  date: string;
-  lotId: string;
-  countedQty: number;
-  reason: 'adjustment' | 'damage' | 'correction' | 'routine';
-  notes?: string;
-}
+  return planningViews.flatMap(view => {
+    const alerts: InventoryAlert[] = [];
 
-/**
- * Sales History for forecasting.
- */
-export interface SalesHistory {
-  id: string;
-  itemId: string;
-  month: string; // YYYY-MM
-  quantitySold: number;
-}
+    if (view.lowStockFlag) {
+      alerts.push({
+        id: typeof crypto !== 'undefined' && 'randomUUID' in crypto ? crypto.randomUUID() : `${view.item.id}_low_${Date.now()}`,
+        createdAt: nowIso,
+        itemId: view.item.id,
+        type: 'lowStock',
+        message: `${view.item.name} is below stock threshold (${Math.round(view.daysCover)} days cover).`,
+        status: 'pending',
+      });
+    }
 
-/**
- * Global application settings.
- * COMMENT: Added fields for forecasting methods, weights, and alert rules.
- */
-export interface Settings {
-  defaultLeadTimeDays: number;
-  safetyStockDays: number;
-  reviewPeriodDays: number;
-  lowStockDaysCoverThreshold: number;
-  expiryWarningDays: number;
-  notificationCooldownHours: number; // Hours to wait before re-alerting
-  currencySymbol: string;
-  whatsappMode: 'disabled' | 'clickToWhatsApp' | 'webhookAPI';
-  whatsappNumber: string; // Default single recipient
-  whatsappRecipients: string[]; // List of numbers for multiple distribution
-  webhookUrl?: string; // For Upgrade 3 webhook support
-  webhookApiKey?: string;
-  forecastMethod: 'simpleAverage6Months' | 'weightedAverage';
-  weights: number[]; // Array of 6 weights for weighted average
-  lowStockRule: 'belowDaysCover' | 'belowReorderPoint';
-}
+    if (view.expiringSoonLots.length > 0) {
+      alerts.push({
+        id: typeof crypto !== 'undefined' && 'randomUUID' in crypto ? crypto.randomUUID() : `${view.item.id}_exp_${Date.now()}`,
+        createdAt: nowIso,
+        itemId: view.item.id,
+        type: 'expiry',
+        message: `${view.item.name} has ${view.expiringSoonLots.length} lot(s) expiring soon.`,
+        status: 'pending',
+      });
+    }
 
-/**
- * Alert data model.
- * COMMENT: Stores detected inventory issues for manual action.
- */
-export interface InventoryAlert {
-  id: string;
-  createdAt: string;
-  itemId: string;
-  type: 'lowStock' | 'expiry';
-  message: string;
-  status: 'pending' | 'sent' | 'dismissed';
-  lastSentAt?: string;
-  recipientsSnapshot?: string[];
-}
-
-/**
- * Planning Data Structure (Joined View)
- */
-export interface ItemPlanningView {
-  item: Item;
-  lots: InventoryLot[];
-  sales: SalesHistory[];
-  availableStock: number;
-  avgMonthlyDemand: number;
-  dailyDemand: number;
-  safetyStock: number;
-  reorderPoint: number;
-  suggestedOrderQty: number;
-  // ADDED: freshness cap info
-  freshnessCapApplied?: boolean;
-  freshnessCapQty?: number;
-  // ADDED: projected days cover after placing suggested order (uses final suggestedOrderQty)
-  projectedDaysCoverAfterOrder?: number;
-  daysCover: number;
-  lowStockFlag: boolean;
-  expiringSoonLots: InventoryLot[];
-}
-
-/**
- * Sales Transaction from Xero export.
- * Used by Reorder Radar, Customer Profiles, and Container Planner screens.
- */
-export interface SalesTransaction {
-  product: string;
-  customer: string;
-  date: string;     // ISO date string YYYY-MM-DD
-  qty: number;      // kg
-  pricePerKg: number;
+    return alerts;
+  });
 }

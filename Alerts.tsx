@@ -1,6 +1,8 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import { Package, AlertTriangle, Info } from 'lucide-react';
-import { RAW_SALES, CURRENT_STOCK, SHELF_LIVES, LEAD_TIME_WEEKS, KG_PER_PALLET, PALLETS_PER_CONTAINER } from '../salesData';
+import { LEAD_TIME_WEEKS, KG_PER_PALLET, PALLETS_PER_CONTAINER } from './productCatalog';
+import { db } from './db';
+import { Item, InventoryLot, SalesHistory } from './types';
 
 // ── Types ──
 interface PlanRow {
@@ -27,29 +29,30 @@ function fmtKg(v: number): string {
   if (Math.abs(v) >= 1000) return (v / 1000).toFixed(1) + 't';
   return Math.round(v) + ' kg';
 }
-function getMonth(d: string): string { return d.substring(0, 7); }
-
-function getProductBase() {
-  const allNames = [...new Set(RAW_SALES.map(s => s.product))];
-  const allMonths = [...new Set(RAW_SALES.map(s => getMonth(s.date)))].sort();
-  const numMonths = allMonths.length || 1;
+function getProductBase(items: Item[], lots: InventoryLot[], sales: SalesHistory[]) {
   const leadTimeDays = LEAD_TIME_WEEKS * 7;
   const reorderPointDays = leadTimeDays + 14;
 
-  return allNames.map(name => {
-    const totalSold = RAW_SALES.filter(s => s.product === name).reduce((a, b) => a + b.qty, 0);
+  return items.map(item => {
+    const itemSales = sales.filter(s => s.itemId === item.id);
+    const uniqueMonths = [...new Set(itemSales.map(s => s.month))];
+    const numMonths = uniqueMonths.length || 1;
+    const totalSold = itemSales.reduce((a, b) => a + Number(b.quantitySold || 0), 0);
     const avgMonthly = totalSold / numMonths;
     const dailyDemand = avgMonthly / 30.4;
-    const stock = CURRENT_STOCK[name] || 0;
+    const stock = lots
+      .filter(l => l.itemId === item.id && l.status === 'available')
+      .reduce((acc, lot) => acc + Number(lot.quantityRemaining || 0), 0);
     const daysCover = dailyDemand > 0 ? Math.min(stock / dailyDemand, 999) : 999;
-    const shelfLife = SHELF_LIVES[name] || 365;
+    const shelfLife = item.shelfLifeDays || 365;
     let status: 'overdue' | 'due_soon' | 'on_track' = 'on_track';
     if (daysCover < leadTimeDays) status = 'overdue';
     else if (daysCover < reorderPointDays) status = 'due_soon';
     return {
-      name, stock, avgMonthly, dailyDemand, shelfLife,
+      name: item.name,
+      stock, avgMonthly, dailyDemand, shelfLife,
       shelfLifeMonths: Math.round(shelfLife / 30), status,
-      category: name.startsWith('Browser') ? 'Browser' : name.startsWith('Clex') ? 'Clex' : 'Segawean',
+      category: item.category,
     };
   }).sort((a, b) => b.avgMonthly - a.avgMonthly);
 }
@@ -72,7 +75,32 @@ const StatusBadge: React.FC<{ status: string }> = ({ status }) => {
 
 // ── Main Component ──
 const ContainerPlanner: React.FC = () => {
-  const baseProducts = useMemo(() => getProductBase(), []);
+  const [items, setItems] = useState<Item[]>([]);
+  const [lots, setLots] = useState<InventoryLot[]>([]);
+  const [sales, setSales] = useState<SalesHistory[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    const loadData = async () => {
+      try {
+        const [dbItems, dbLots, dbSales] = await Promise.all([
+          db.getAll<Item>('items'),
+          db.getAll<InventoryLot>('lots'),
+          db.getAll<SalesHistory>('sales'),
+        ]);
+        setItems(dbItems);
+        setLots(dbLots);
+        setSales(dbSales);
+      } catch (err) {
+        console.error('Failed to load container planner data.', err);
+      } finally {
+        setLoading(false);
+      }
+    };
+    loadData();
+  }, []);
+
+  const baseProducts = useMemo(() => getProductBase(items, lots, sales), [items, lots, sales]);
   const [safetyPct, setSafetyPct] = useState(15);
   const [seasonals, setSeasonals] = useState<Record<string, number>>(() => {
     const m: Record<string, number> = {};
@@ -109,6 +137,24 @@ const ContainerPlanner: React.FC = () => {
   const totalPallets = planRows.reduce((a, b) => a + b.pallets, 0);
   const remaining = PALLETS_PER_CONTAINER - totalPallets;
   const shelfAlerts = planRows.filter(r => r.shelfAlert);
+
+  if (loading) {
+    return <div className="text-slate-500">Loading Container Planner...</div>;
+  }
+
+  if (baseProducts.length === 0) {
+    return (
+      <div className="space-y-6">
+        <div>
+          <h2 className="text-3xl font-bold text-slate-800 mb-2">Container Planner</h2>
+          <p className="text-slate-500">No inventory and sales data available.</p>
+        </div>
+        <div className="bg-white rounded-2xl border border-slate-200 p-8 text-slate-500">
+          Blank slate active. Import stock and sales data to build a container plan.
+        </div>
+      </div>
+    );
+  }
 
   const updateSeasonal = (name: string, val: string) => {
     setSeasonals(prev => ({ ...prev, [name]: parseFloat(val) || 1 }));

@@ -1,152 +1,188 @@
-
-import React, { useState } from 'react';
-import { Item, SalesHistory } from '../types';
-import { db } from '../db';
-import { TrendingUp, Save, Search } from 'lucide-react';
-
-interface Props {
-  items: Item[];
-  sales: SalesHistory[];
-  onRefresh: () => void;
+export interface Item {
+  id: string;
+  skuCode: string;
+  name: string;
+  category: 'Clex' | 'Browser' | 'Segawean' | 'Other';
+  packSize: number;
+  leadTimeDays: number;
+  moq: number;
+  costPerUnit: number;
+  notes?: string;
+  shelfLifeDays?: number;
 }
 
-const SalesEntry: React.FC<Props> = ({ items, sales, onRefresh }) => {
-  const [searchTerm, setSearchTerm] = useState('');
-  const [editingItemId, setEditingItemId] = useState<string | null>(null);
-  const [tempSales, setTempSales] = useState<Record<string, string>>({}); // itemId_month -> value
+export interface InventoryLot {
+  id: string;
+  itemId: string;
+  lotNumber: string;
+  expiryDate: string | null;
+  quantityRemaining: number;
+  receivedDate: string | null;
+  quantityReceived?: number | null;
+  status: 'available' | 'expired' | 'damaged';
+  notes?: string;
+}
 
-  // Last 6 months calculation
-  const getMonthKeys = () => {
-    const months = [];
-    const date = new Date();
-    for (let i = 0; i < 6; i++) {
-      const d = new Date(date.getFullYear(), date.getMonth() - i, 1);
-      months.push(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`);
-    }
-    return months.reverse();
-  };
+export interface StockCountEntry {
+  id: string;
+  date: string;
+  lotId: string;
+  countedQty: number;
+  reason: 'adjustment' | 'damage' | 'correction' | 'routine';
+  notes?: string;
+}
 
-  const monthKeys = getMonthKeys();
+export interface SalesHistory {
+  id: string;
+  itemId: string;
+  month: string;
+  quantitySold: number;
+}
 
-  const handleEdit = (item: Item) => {
-    setEditingItemId(item.id);
-    const initialValues: Record<string, string> = {};
-    monthKeys.forEach(m => {
-      const existing = sales.find(s => s.itemId === item.id && s.month === m);
-      initialValues[`${item.id}_${m}`] = existing?.quantitySold.toString() || '0';
-    });
-    setTempSales(initialValues);
-  };
+export interface Settings {
+  defaultLeadTimeDays: number;
+  safetyStockDays: number;
+  reviewPeriodDays: number;
+  lowStockDaysCoverThreshold: number;
+  expiryWarningDays: number;
+  notificationCooldownHours: number;
+  currencySymbol: string;
+  whatsappMode: 'disabled' | 'clickToWhatsApp' | 'webhookAPI';
+  whatsappNumber: string;
+  whatsappRecipients: string[];
+  webhookUrl?: string;
+  webhookApiKey?: string;
+  forecastMethod: 'simpleAverage6Months' | 'weightedAverage';
+  weights: number[];
+  lowStockRule: 'belowDaysCover' | 'belowReorderPoint';
+}
 
-  const handleSave = async (itemId: string) => {
-    const updates = monthKeys.map(m => ({
-      id: `${itemId}_${m}`,
-      itemId,
-      month: m,
-      quantitySold: Number(tempSales[`${itemId}_${m}`] || 0)
-    }));
+export interface InventoryAlert {
+  id: string;
+  createdAt: string;
+  itemId: string;
+  type: 'lowStock' | 'expiry';
+  message: string;
+  status: 'pending' | 'sent' | 'dismissed';
+  lastSentAt?: string;
+  recipientsSnapshot?: string[];
+}
 
-    for (const update of updates) {
-      await db.put('sales', update);
-    }
+export interface ItemPlanningView {
+  item: Item;
+  lots: InventoryLot[];
+  sales: SalesHistory[];
+  availableStock: number;
+  avgMonthlyDemand: number;
+  dailyDemand: number;
+  safetyStock: number;
+  reorderPoint: number;
+  suggestedOrderQty: number;
+  freshnessCapApplied?: boolean;
+  freshnessCapQty?: number;
+  projectedDaysCoverAfterOrder?: number;
+  daysCover: number;
+  lowStockFlag: boolean;
+  expiringSoonLots: InventoryLot[];
+}
 
-    setEditingItemId(null);
-    onRefresh();
-  };
+export interface SalesTransaction {
+  id?: string;
+  product: string;
+  customer: string;
+  date: string;
+  qty: number;
+  pricePerKg: number;
+}
 
-  const filteredItems = items.filter(i => 
-    i.name.toLowerCase().includes(searchTerm.toLowerCase()) || 
-    i.skuCode.toLowerCase().includes(searchTerm.toLowerCase())
-  );
+export interface NormalizedTransaction {
+  customerName: string;
+  transactionDate: string;
+  transactionType: string;
+  number: string;
+  productService: string;
+  memo: string;
+  quantity: number;
+  unitPrice: number;
+  amount: number;
+}
 
-  return (
-    <div className="space-y-8">
-      <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
-        <div>
-          <h2 className="text-3xl font-bold text-slate-800 mb-2">Demand Forecast Entry</h2>
-          <p className="text-slate-500">Manually record last 6 months sales to calculate average demand.</p>
-        </div>
-        <div className="relative">
-          <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={18} />
-          <input 
-            type="text" 
-            placeholder="Search products..."
-            className="pl-10 pr-4 py-2 border border-slate-200 rounded-xl focus:ring-2 focus:ring-green-600/20 w-64"
-            value={searchTerm}
-            onChange={e => setSearchTerm(e.target.value)}
-          />
-        </div>
-      </div>
+export interface ImportMetadata {
+  sourceFileName: string;
+  sheetName: string;
+  formatDetected: 'inventoryLotsTemplate' | 'quickbooksSalesDetail' | 'genericTable' | 'unknown';
+  confidence: number;
+}
 
-      <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
-        <div className="overflow-x-auto">
-          <table className="w-full text-left">
-            <thead>
-              <tr className="bg-slate-50 border-b border-slate-100">
-                <th className="px-6 py-4 font-semibold text-slate-500 text-sm">Product</th>
-                {monthKeys.map(m => (
-                  <th key={m} className="px-4 py-4 font-semibold text-slate-500 text-sm text-center">{m}</th>
-                ))}
-                <th className="px-6 py-4 font-semibold text-slate-500 text-sm text-right">Actions</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-slate-100">
-              {filteredItems.map(item => (
-                <tr key={item.id} className="hover:bg-slate-50/50">
-                  <td className="px-6 py-4">
-                    <div className="font-bold text-slate-800">{item.name}</div>
-                    <div className="text-xs text-slate-400">{item.skuCode}</div>
-                  </td>
-                  {monthKeys.map(m => {
-                    const isEditing = editingItemId === item.id;
-                    const val = isEditing 
-                      ? tempSales[`${item.id}_${m}`] 
-                      : sales.find(s => s.itemId === item.id && s.month === m)?.quantitySold || 0;
-                    
-                    return (
-                      <td key={m} className="px-4 py-4 text-center">
-                        {isEditing ? (
-                          <input 
-                            type="number"
-                            className="w-20 px-2 py-1 text-center border border-slate-200 rounded focus:ring-2 focus:ring-green-600/20"
-                            value={String(val ?? '')}
-                            onChange={e => {
-                              setTempSales(prev => ({ ...prev, [`${item.id}_${m}`]: e.target.value }));
-                            }}
-                            min={0}
-                            step={1}
-                          />
-                        ) : (
-                          <span className="text-slate-600 font-medium">{val}</span>
-                        )}
-                      </td>
-                    );
-                  })}
-                  <td className="px-6 py-4 text-right">
-                    {editingItemId === item.id ? (
-                      <button 
-                        onClick={() => handleSave(item.id)}
-                        className="px-4 py-2 bg-green-600 text-white rounded-lg text-sm font-bold shadow-sm"
-                      >
-                        Save
-                      </button>
-                    ) : (
-                      <button 
-                        onClick={() => handleEdit(item)}
-                        className="text-slate-400 hover:text-blue-600 transition-colors"
-                      >
-                        <TrendingUp size={20} />
-                      </button>
-                    )}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      </div>
-    </div>
-  );
-};
+export interface ParseResult {
+  transactions: NormalizedTransaction[];
+  metadata: ImportMetadata;
+  warnings: string[];
+  errors: string[];
+}
 
-export default SalesEntry;
+export interface CustomerV5 {
+  id: string;
+  name: string;
+  aliases: string[];
+  tags: string[];
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ProductV5 {
+  id: string;
+  name: string;
+  brand: string;
+  packSize: number;
+  packUom: string;
+  active: boolean;
+}
+
+export interface OrderV5 {
+  id: string;
+  docNumber: string;
+  docType: string;
+  docDate: string;
+  customerId: string;
+  customerNameRaw: string;
+  subtotal: number;
+  total: number;
+  status: string;
+  importBatchId: string;
+  hashKey: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface OrderLineV5 {
+  id: string;
+  orderId: string;
+  productNameRaw: string;
+  productNameNormalized?: string;
+  memo: string;
+  qty: number;
+  uom?: string;
+  unitPrice: number;
+  amount: number;
+  packCount?: number;
+  packSize?: number;
+  packUom?: string;
+  packType?: string;
+  derivedKg?: number;
+  sortIndex: number;
+  createdAt: string;
+}
+
+export interface ImportBatchV5 {
+  id: string;
+  fileName: string;
+  sheetName: string;
+  formatDetected: string;
+  confidence: number;
+  rowCountRaw: number;
+  ordersCreated: number;
+  linesCreated: number;
+  warnings: string[];
+  createdAt: string;
+}

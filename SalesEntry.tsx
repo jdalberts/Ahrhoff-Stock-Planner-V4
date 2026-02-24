@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
-import { InventoryLot, Item } from '../types';
-import { LOT_STATUSES } from '../constants';
-import { db } from '../db';
+import { InventoryLot, Item } from './types';
+import { LOT_STATUSES } from './constants';
+import { db } from './db';
 import { Search, Trash2, Calendar, Archive, Plus, X, AlertTriangle } from 'lucide-react';
 
 interface Props {

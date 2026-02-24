@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
-import { Item } from '../types';
-import { CATEGORIES } from '../constants';
-import { db } from '../db';
+import { Item } from './types';
+import { CATEGORIES } from './constants';
+import { db } from './db';
 import { Plus, Trash2, Edit2, Search, Info } from 'lucide-react';
 
 interface Props {

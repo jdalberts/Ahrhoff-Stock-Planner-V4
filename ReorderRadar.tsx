@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { ItemPlanningView, Settings } from '../types';
+import { ItemPlanningView, Settings } from './types';
 import { ShoppingCart, MessageCircle, FileDown, Info } from 'lucide-react';
 
 interface Props {
