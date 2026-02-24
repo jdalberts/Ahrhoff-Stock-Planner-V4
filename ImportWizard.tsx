@@ -131,6 +131,7 @@ const ImportWizard: React.FC<Props> = ({ onImported }) => {
     const saved = localStorage.getItem('import_duplicate_choice') as DuplicateChoice | null;
     return saved || 'importAll';
   });
+  const [excludedRowIndexes, setExcludedRowIndexes] = useState<Set<number>>(new Set());
   const [importSummary, setImportSummary] = useState<{ ordersCreated: number; linesCreated: number; duplicates: number } | null>(null);
   const [duplicateReviewRows, setDuplicateReviewRows] = useState<DuplicateReviewRow[]>([]);
   const [duplicateRowActions, setDuplicateRowActions] = useState<Record<string, DuplicateRowAction>>({});
@@ -138,20 +139,42 @@ const ImportWizard: React.FC<Props> = ({ onImported }) => {
   const sheetRows = workbook?.sheets[selectedSheet]?.rows || [];
   const detection = useMemo(() => detectFormat(sheetRows), [sheetRows]);
 
-  const parsedPreview = useMemo(() => {
+  const selectedTransactions = useMemo(() => {
     if (!parseResult) return [];
-    return parseResult.transactions.slice(0, 50);
-  }, [parseResult]);
+    return parseResult.transactions.filter((_, index) => !excludedRowIndexes.has(index));
+  }, [parseResult, excludedRowIndexes]);
+
+  const parsedPreview = useMemo(() => {
+    return selectedTransactions.slice(0, 50);
+  }, [selectedTransactions]);
+
+  const deselectedPreviewRows = useMemo(() => {
+    if (!parseResult) return [] as Array<{ rowNumber: number; customerName: string; transactionDate: string; productService: string }>;
+
+    const rows: Array<{ rowNumber: number; customerName: string; transactionDate: string; productService: string }> = [];
+    for (let index = 0; index < parseResult.transactions.length; index++) {
+      if (!excludedRowIndexes.has(index)) continue;
+      const tx = parseResult.transactions[index];
+      rows.push({
+        rowNumber: index + 1,
+        customerName: tx.customerName,
+        transactionDate: tx.transactionDate,
+        productService: tx.productService,
+      });
+      if (rows.length >= 10) break;
+    }
+    return rows;
+  }, [parseResult, excludedRowIndexes]);
 
   const previewStats = useMemo(() => {
     if (!parseResult) return { totalRows: 0, ordersDetected: 0, customersDetected: 0 };
-    const grouped = aggregateOrders(parseResult.transactions);
+    const grouped = aggregateOrders(selectedTransactions);
     return {
-      totalRows: parseResult.transactions.length,
+      totalRows: selectedTransactions.length,
       ordersDetected: grouped.length,
-      customersDetected: new Set(parseResult.transactions.map(tx => normalizeText(tx.customerName))).size,
+      customersDetected: new Set(selectedTransactions.map(tx => normalizeText(tx.customerName))).size,
     };
-  }, [parseResult]);
+  }, [parseResult, selectedTransactions]);
 
   const duplicateActionSummary = useMemo(() => {
     const summary = {
@@ -180,6 +203,7 @@ const ImportWizard: React.FC<Props> = ({ onImported }) => {
     setWorkbook(null);
     setSelectedSheet(0);
     setParseResult(null);
+    setExcludedRowIndexes(new Set());
     setFatalError('');
     setImportSummary(null);
     setDuplicateReviewRows([]);
@@ -224,14 +248,46 @@ const ImportWizard: React.FC<Props> = ({ onImported }) => {
     }
 
     setParseResult(result);
+    setExcludedRowIndexes(new Set());
     setStep(4);
+  };
+
+  const togglePreviewRow = (index: number) => {
+    setExcludedRowIndexes(prev => {
+      const next = new Set(prev);
+      if (next.has(index)) {
+        next.delete(index);
+      } else {
+        next.add(index);
+      }
+      return next;
+    });
+  };
+
+  const selectAllPreviewRows = () => {
+    setExcludedRowIndexes(new Set());
+  };
+
+  const deselectAllPreviewRows = () => {
+    if (!parseResult) return;
+    const next = new Set<number>();
+    for (let i = 0; i < parseResult.transactions.length; i++) {
+      next.add(i);
+    }
+    setExcludedRowIndexes(next);
   };
 
   const continueToConfirm = () => {
     if (!parseResult) return;
+    if (selectedTransactions.length === 0) {
+      setFatalError('Select at least one preview row to continue.');
+      return;
+    }
+
+    setFatalError('');
 
     void (async () => {
-      const groupedOrders = aggregateOrders(parseResult.transactions);
+      const groupedOrders = aggregateOrders(selectedTransactions);
       const existingOrders = await db.getAll<OrderV5>('orders');
       const existingLines = await db.getAll<OrderLineV5>('order_lines');
 
@@ -262,6 +318,10 @@ const ImportWizard: React.FC<Props> = ({ onImported }) => {
 
   const executeImport = async () => {
     if (!parseResult || !workbook) return;
+    if (selectedTransactions.length === 0) {
+      setFatalError('Select at least one preview row to import.');
+      return;
+    }
 
     setBusy(true);
     setFatalError('');
@@ -270,7 +330,7 @@ const ImportWizard: React.FC<Props> = ({ onImported }) => {
       const validRows: NormalizedTransaction[] = [];
       const warnings = [...parseResult.warnings];
 
-      for (const tx of parseResult.transactions) {
+      for (const tx of selectedTransactions) {
         if (!tx.transactionDate) {
           warnings.push(`Skipped row: missing date for ${tx.customerName || 'unknown customer'}.`);
           continue;
@@ -479,7 +539,7 @@ const ImportWizard: React.FC<Props> = ({ onImported }) => {
   const exportPreviewCsv = () => {
     if (!parseResult) return;
     const header = ['Customer', 'Date', 'Invoice', 'Product', 'Quantity', 'Amount'];
-    const rows = parseResult.transactions.map(tx => [
+    const rows = selectedTransactions.map(tx => [
       tx.customerName,
       tx.transactionDate,
       tx.number,
@@ -589,8 +649,14 @@ const ImportWizard: React.FC<Props> = ({ onImported }) => {
             <button onClick={exportPreviewCsv} className="px-3 py-2 text-xs border rounded-lg text-slate-600">Export Preview CSV</button>
           </div>
 
+          <div className="flex items-center gap-2 text-xs">
+            <button onClick={selectAllPreviewRows} className="px-3 py-1.5 border rounded-lg text-slate-600">Select all</button>
+            <button onClick={deselectAllPreviewRows} className="px-3 py-1.5 border rounded-lg text-slate-600">Deselect all</button>
+            <span className="text-slate-500">Selected for upload: <b>{selectedTransactions.length}</b> / {parseResult.transactions.length}</span>
+          </div>
+
           <div className="grid grid-cols-1 md:grid-cols-3 gap-3 text-sm">
-            <div className="p-3 rounded-lg border bg-slate-50">Total rows found: <b>{previewStats.totalRows}</b></div>
+            <div className="p-3 rounded-lg border bg-slate-50">Rows selected: <b>{previewStats.totalRows}</b></div>
             <div className="p-3 rounded-lg border bg-slate-50">Orders detected: <b>{previewStats.ordersDetected}</b></div>
             <div className="p-3 rounded-lg border bg-slate-50">Customers detected: <b>{previewStats.customersDetected}</b></div>
           </div>
@@ -599,14 +665,28 @@ const ImportWizard: React.FC<Props> = ({ onImported }) => {
             <table className="w-full text-sm">
               <thead className="bg-slate-50">
                 <tr>
-                  {['Customer', 'Date', 'Invoice', 'Product', 'Quantity', 'Amount'].map(header => (
+                  {['Select', 'Customer', 'Date', 'Invoice', 'Product', 'Quantity', 'Amount'].map(header => (
                     <th key={header} className="text-left px-3 py-2 text-xs uppercase text-slate-500">{header}</th>
                   ))}
                 </tr>
               </thead>
               <tbody>
-                {parsedPreview.map((row, index) => (
-                  <tr key={index} className="border-t">
+                {parseResult.transactions.slice(0, 50).map((row, index) => {
+                  const isSelected = !excludedRowIndexes.has(index);
+                  return (
+                  <tr
+                    key={index}
+                    className={`border-t cursor-pointer ${isSelected ? 'bg-white' : 'bg-slate-100 text-slate-400 line-through'}`}
+                    onClick={() => togglePreviewRow(index)}
+                  >
+                    <td className="px-3 py-2">
+                      <input
+                        type="checkbox"
+                        checked={isSelected}
+                        onChange={() => togglePreviewRow(index)}
+                        onClick={(event) => event.stopPropagation()}
+                      />
+                    </td>
                     <td className="px-3 py-2">{row.customerName}</td>
                     <td className="px-3 py-2">{row.transactionDate}</td>
                     <td className="px-3 py-2">{row.number}</td>
@@ -614,12 +694,35 @@ const ImportWizard: React.FC<Props> = ({ onImported }) => {
                     <td className="px-3 py-2">{row.quantity}</td>
                     <td className="px-3 py-2">{row.amount}</td>
                   </tr>
-                ))}
+                  );
+                })}
               </tbody>
             </table>
           </div>
 
-          <button onClick={continueToConfirm} className="px-5 py-2 bg-blue-600 text-white rounded-lg font-semibold">Continue</button>
+          {excludedRowIndexes.size > 0 && (
+            <div className="p-3 rounded-xl border border-amber-200 bg-amber-50 text-amber-800 text-sm">
+              <p className="font-semibold mb-2">Deselected rows (not uploaded): {excludedRowIndexes.size}</p>
+              <ul className="list-disc list-inside max-h-36 overflow-auto space-y-1">
+                {deselectedPreviewRows.map((row) => (
+                  <li key={row.rowNumber}>
+                    Row {row.rowNumber}: {row.customerName || 'Unknown customer'} • {row.transactionDate || 'No date'} • {row.productService || 'No product'}
+                  </li>
+                ))}
+              </ul>
+              {excludedRowIndexes.size > deselectedPreviewRows.length && (
+                <p className="text-xs mt-2 text-amber-700">Showing first {deselectedPreviewRows.length} deselected rows.</p>
+              )}
+            </div>
+          )}
+
+          <button
+            onClick={continueToConfirm}
+            disabled={selectedTransactions.length === 0}
+            className="px-5 py-2 bg-blue-600 text-white rounded-lg font-semibold disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            Continue
+          </button>
         </div>
       )}
 
