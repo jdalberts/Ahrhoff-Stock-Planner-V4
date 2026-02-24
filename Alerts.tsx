@@ -90,7 +90,11 @@ const StatusBadge: React.FC<{ status: string }> = ({ status }) => {
 };
 
 // ── Main Component ──
-const ContainerPlanner: React.FC = () => {
+interface Props {
+  onDataChanged?: () => Promise<void> | void;
+}
+
+const ContainerPlanner: React.FC<Props> = ({ onDataChanged }) => {
   const [items, setItems] = useState<Item[]>([]);
   const [lots, setLots] = useState<InventoryLot[]>([]);
   const [sales, setSales] = useState<SalesHistory[]>([]);
@@ -234,6 +238,17 @@ const ContainerPlanner: React.FC = () => {
     setTransitContainers(fresh);
   };
 
+  const refreshLots = async () => {
+    const freshLots = await db.getAll<InventoryLot>('lots');
+    setLots(freshLots);
+  };
+
+  const syncAppData = async () => {
+    if (onDataChanged) {
+      await onDataChanged();
+    }
+  };
+
   const validateTransitMeta = (): boolean => {
     if (!meta.orderNumber.trim() || !meta.shipName.trim() || !meta.eta) {
       setTransitError('Order number, ship name, and ETA are required.');
@@ -264,6 +279,7 @@ const ContainerPlanner: React.FC = () => {
       };
       await db.put('transit_containers', container);
       await refreshTransitContainers();
+      await syncAppData();
       setTransitError(null);
       setMeta(prev => ({ ...prev, orderNumber: '', shipName: '', eta: '' }));
     } catch (err) {
@@ -303,12 +319,60 @@ const ContainerPlanner: React.FC = () => {
 
   const updateContainerStatus = async (container: TransitContainer, status: TransitContainerStatus) => {
     try {
+      if (status === 'received' && container.status !== 'received') {
+        const dbLots = await db.getAll<InventoryLot>('lots');
+        const today = new Date().toISOString().split('T')[0];
+
+        for (const line of container.lines || []) {
+          const receivedQty = Math.max(0, Number(line.quantityKg || 0));
+          if (receivedQty <= 0) continue;
+
+          const existingLot = dbLots
+            .filter(l => l.itemId === line.itemId && l.status === 'available')
+            .sort((a, b) => {
+              const aDate = new Date(a.receivedDate || 0).getTime();
+              const bDate = new Date(b.receivedDate || 0).getTime();
+              return bDate - aDate;
+            })[0];
+
+          if (existingLot) {
+            const updatedLot: InventoryLot = {
+              ...existingLot,
+              quantityRemaining: Number(existingLot.quantityRemaining || 0) + receivedQty,
+              quantityReceived: Number(existingLot.quantityReceived || existingLot.quantityRemaining || 0) + receivedQty,
+              notes: existingLot.notes
+                ? `${existingLot.notes} | Received from container ${container.orderNumber}`
+                : `Received from container ${container.orderNumber}`,
+            };
+            await db.put('lots', updatedLot);
+          } else {
+            const newLot: InventoryLot = {
+              id: typeof crypto !== 'undefined' && 'randomUUID' in crypto
+                ? crypto.randomUUID()
+                : `lot_${Date.now()}_${line.itemId}`,
+              itemId: line.itemId,
+              lotNumber: `RCV-${today}-${container.orderNumber}`,
+              expiryDate: null,
+              quantityRemaining: receivedQty,
+              quantityReceived: receivedQty,
+              receivedDate: today,
+              status: 'available',
+              notes: `Auto-created from received container ${container.orderNumber} (${container.shipName})`,
+            };
+            await db.put('lots', newLot);
+          }
+        }
+      }
+
       await db.put('transit_containers', {
         ...container,
         status,
         updatedAt: new Date().toISOString(),
       });
+
       await refreshTransitContainers();
+      await refreshLots();
+      await syncAppData();
     } catch (err) {
       console.error('Failed to update transit container status.', err);
       setTransitError('Failed to update container status.');
@@ -363,6 +427,7 @@ const ContainerPlanner: React.FC = () => {
     try {
       await db.delete('transit_containers', containerId);
       await refreshTransitContainers();
+      await syncAppData();
       setTransitError(null);
     } catch (err) {
       console.error('Failed to delete transit container.', err);
@@ -441,6 +506,7 @@ const ContainerPlanner: React.FC = () => {
         updatedAt: new Date().toISOString(),
       });
       await refreshTransitContainers();
+      await syncAppData();
       cancelEditingContainer();
       setTransitError(null);
     } catch (err) {

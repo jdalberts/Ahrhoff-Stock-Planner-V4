@@ -295,7 +295,7 @@ const AppContent: React.FC = () => {
           {activeTab === 'orderplan' && <OrderPlan planningViews={planningViews} settings={settings} />}
           {activeTab === 'radar' && <ReorderRadar setActiveTab={setActiveTab} />}
           {activeTab === 'customers' && <CustomerProfiles />}
-          {activeTab === 'container' && <ContainerPlanner />}
+          {activeTab === 'container' && <ContainerPlanner onDataChanged={refreshData} />}
           {activeTab === 'salesorders' && <SalesOrdersView />}
           {activeTab === 'import' && <ImportWizard onImported={refreshData} />}
           {activeTab === 'settings' && <SettingsPage settings={settings} onUpdate={updateSettings} />}
