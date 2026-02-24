@@ -21,14 +21,14 @@ const Items: React.FC<Props> = ({ items, onRefresh }) => {
     name: '',
     category: 'Other',
     packSize: 25,
-    leadTimeDays: 14,
-    moq: 0,
+    leadTimeDays: 60,
+    moq: 1000,
     costPerUnit: 0,
     shelfLifeDays: 365
   });
 
   const resetForm = () => {
-    setNewItem({ id: '', skuCode: '', name: '', category: 'Other', packSize: 25, leadTimeDays: 14, moq: 0, costPerUnit: 0, shelfLifeDays: 365 });
+    setNewItem({ id: '', skuCode: '', name: '', category: 'Other', packSize: 25, leadTimeDays: 60, moq: 1000, costPerUnit: 0, shelfLifeDays: 365 });
     setValidationError(null);
   };
 

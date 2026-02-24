@@ -565,8 +565,8 @@ const ImportWizard: React.FC<Props> = ({ onImported }) => {
             name: row.productName,
             category: 'Other',
             packSize: 1,
-            leadTimeDays: 14,
-            moq: 0,
+            leadTimeDays: 60,
+            moq: 1000,
             costPerUnit: 0,
           };
           await db.put('items', item);

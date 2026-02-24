@@ -1,7 +1,7 @@
 import { Settings } from './types';
 
 export const DEFAULT_SETTINGS: Settings = {
-  defaultLeadTimeDays: 14,
+  defaultLeadTimeDays: 60,
   safetyStockDays: 7,
   reviewPeriodDays: 7,
   lowStockDaysCoverThreshold: 21,

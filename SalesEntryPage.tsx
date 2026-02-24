@@ -228,8 +228,8 @@ const SalesEntry: React.FC<Props> = ({ items, sales, onRefresh }) => {
           name: productName,
           category: inferCategory(productName),
           packSize: 1,
-          leadTimeDays: 14,
-          moq: 0,
+          leadTimeDays: 60,
+          moq: 1000,
           costPerUnit: 0,
         };
         await db.put('items', autoItem);

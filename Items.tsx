@@ -214,8 +214,8 @@ const StockTake: React.FC<Props> = ({ lots, items, onRefresh }) => {
             name: row.productName,
             category: 'Other',
             packSize: 1,
-            leadTimeDays: 14,
-            moq: 0,
+            leadTimeDays: 60,
+            moq: 1000,
             costPerUnit: 0,
           };
           await db.put('items', item);
