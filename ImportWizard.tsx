@@ -1,11 +1,12 @@
-import React, { useMemo, useState } from 'react';
-import { AlertTriangle, CheckCircle, FileSpreadsheet, Upload, X } from 'lucide-react';
+import React, { useEffect, useMemo, useState } from 'react';
+import { AlertTriangle, CheckCircle, FileSpreadsheet, Search, Upload, X } from 'lucide-react';
 import { db } from './db';
-import { CustomerV5, ImportBatchV5, NormalizedTransaction, OrderLineV5, OrderV5, ParseResult, ProductV5 } from './types';
+import { CustomerV5, ImportBatchV5, InventoryLot, Item, NormalizedTransaction, OrderLineV5, OrderV5, ParseResult, ProductV5 } from './types';
 import { detectFormat, parseByFormat, parseWorkbook, WorkbookParseResult } from './src/import/parsers';
 import { normalizeProductName, parsePackInfo } from './productNormalization';
 
 type Step = 1 | 2 | 3 | 4 | 5 | 6;
+type ParseMode = 'sales' | 'stock';
 type DuplicateChoice = 'importAll' | 'merge' | 'replace' | 'cancel';
 type DuplicateRowAction = 'useGlobal' | 'merge' | 'replace' | 'importNew' | 'skip';
 
@@ -25,6 +26,24 @@ interface DuplicateReviewRow {
   existingLineCount: number;
 }
 
+interface InvoiceSelectionGroup {
+  key: string;
+  invoice: string;
+  customerName: string;
+  date: string;
+  totalRows: number;
+  selectedRows: number;
+  indices: number[];
+}
+
+interface StockPreviewRow {
+  id: string;
+  rowNumber: number;
+  productName: string;
+  qtyOnHand: number;
+  skip: boolean;
+}
+
 interface Props {
   onImported?: () => Promise<void> | void;
 }
@@ -32,6 +51,19 @@ interface Props {
 const uid = (): string => Date.now().toString(36) + Math.random().toString(36).slice(2, 9);
 
 const normalizeText = (value: string): string => value.toLowerCase().replace(/\s+/g, ' ').trim();
+
+const toNumber = (value: any): number => {
+  const raw = String(value ?? '').trim();
+  if (!raw) return 0;
+  let cleaned = raw.replace(/\s+/g, '');
+  if (cleaned.includes(',') && cleaned.includes('.')) {
+    cleaned = cleaned.replace(/,/g, '');
+  } else if (cleaned.includes(',') && !cleaned.includes('.')) {
+    cleaned = cleaned.replace(/,/g, '.');
+  }
+  const parsed = Number(cleaned);
+  return Number.isFinite(parsed) ? parsed : 0;
+};
 
 const csvEscape = (value: string | number): string => {
   const raw = String(value ?? '');
@@ -123,7 +155,9 @@ const ImportWizard: React.FC<Props> = ({ onImported }) => {
   const [file, setFile] = useState<File | null>(null);
   const [workbook, setWorkbook] = useState<WorkbookParseResult | null>(null);
   const [selectedSheet, setSelectedSheet] = useState(0);
+  const [parseMode, setParseMode] = useState<ParseMode>('sales');
   const [parseResult, setParseResult] = useState<ParseResult | null>(null);
+  const [stockPreviewRows, setStockPreviewRows] = useState<StockPreviewRow[]>([]);
   const [debugMode, setDebugMode] = useState<boolean>(() => localStorage.getItem('import_debug_mode') === '1');
   const [busy, setBusy] = useState(false);
   const [fatalError, setFatalError] = useState('');
@@ -132,7 +166,10 @@ const ImportWizard: React.FC<Props> = ({ onImported }) => {
     return saved || 'importAll';
   });
   const [excludedRowIndexes, setExcludedRowIndexes] = useState<Set<number>>(new Set());
+  const [selectedInvoiceGroupKey, setSelectedInvoiceGroupKey] = useState('');
+  const [previewSearchTerm, setPreviewSearchTerm] = useState('');
   const [importSummary, setImportSummary] = useState<{ ordersCreated: number; linesCreated: number; duplicates: number } | null>(null);
+  const [stockImportSummary, setStockImportSummary] = useState<{ rowsApplied: number; lotsCreated: number; itemsCreated: number } | null>(null);
   const [duplicateReviewRows, setDuplicateReviewRows] = useState<DuplicateReviewRow[]>([]);
   const [duplicateRowActions, setDuplicateRowActions] = useState<Record<string, DuplicateRowAction>>({});
 
@@ -197,15 +234,97 @@ const ImportWizard: React.FC<Props> = ({ onImported }) => {
     return summary;
   }, [duplicateReviewRows, duplicateChoice, duplicateRowActions]);
 
+  const selectedStockRows = useMemo(() => {
+    return stockPreviewRows.filter(row => !row.skip);
+  }, [stockPreviewRows]);
+
+  const previewRowsForTable = useMemo(() => {
+    if (!parseResult) return [] as Array<{ row: NormalizedTransaction; index: number }>;
+
+    const needle = normalizeText(previewSearchTerm);
+    const source = parseResult.transactions.map((row, index) => ({ row, index }));
+    const filtered = !needle
+      ? source
+      : source.filter(({ row }) => {
+          const haystack = [row.customerName, row.number, row.productService, row.transactionDate]
+            .map(value => normalizeText(value || ''))
+            .join(' ');
+          return haystack.includes(needle);
+        });
+
+    return filtered.slice(0, 50);
+  }, [parseResult, previewSearchTerm]);
+
+  const invoiceSelectionGroups = useMemo(() => {
+    if (!parseResult) return [] as InvoiceSelectionGroup[];
+
+    const grouped = new Map<string, InvoiceSelectionGroup>();
+    for (let index = 0; index < parseResult.transactions.length; index++) {
+      const tx = parseResult.transactions[index];
+      const invoice = tx.number || 'No invoice';
+      const customerName = tx.customerName || 'Unknown customer';
+      const date = tx.transactionDate || 'No date';
+      const key = `${invoice}|${customerName}|${date}`;
+
+      if (!grouped.has(key)) {
+        grouped.set(key, {
+          key,
+          invoice,
+          customerName,
+          date,
+          totalRows: 0,
+          selectedRows: 0,
+          indices: [],
+        });
+      }
+
+      const group = grouped.get(key)!;
+      group.totalRows += 1;
+      group.selectedRows += excludedRowIndexes.has(index) ? 0 : 1;
+      group.indices.push(index);
+    }
+
+    return [...grouped.values()].sort((a, b) => {
+      if (a.date !== b.date) return b.date.localeCompare(a.date);
+      return a.invoice.localeCompare(b.invoice);
+    });
+  }, [parseResult, excludedRowIndexes]);
+
+  const selectedInvoiceGroup = useMemo(() => {
+    if (!selectedInvoiceGroupKey) return null;
+    return invoiceSelectionGroups.find(group => group.key === selectedInvoiceGroupKey) || null;
+  }, [invoiceSelectionGroups, selectedInvoiceGroupKey]);
+
+  const selectedInvoiceLines = useMemo(() => {
+    if (!parseResult || !selectedInvoiceGroup) return [] as Array<{ row: NormalizedTransaction; index: number }>;
+    return selectedInvoiceGroup.indices.map(index => ({ row: parseResult.transactions[index], index }));
+  }, [parseResult, selectedInvoiceGroup]);
+
+  useEffect(() => {
+    if (invoiceSelectionGroups.length === 0) {
+      if (selectedInvoiceGroupKey) setSelectedInvoiceGroupKey('');
+      return;
+    }
+
+    if (!invoiceSelectionGroups.some(group => group.key === selectedInvoiceGroupKey)) {
+      setSelectedInvoiceGroupKey(invoiceSelectionGroups[0].key);
+    }
+  }, [invoiceSelectionGroups, selectedInvoiceGroupKey]);
+
   const reset = () => {
     setStep(1);
     setFile(null);
     setWorkbook(null);
     setSelectedSheet(0);
+    setParseMode('sales');
     setParseResult(null);
+    setStockPreviewRows([]);
     setExcludedRowIndexes(new Set());
+    setSelectedInvoiceGroupKey('');
+    setPreviewSearchTerm('');
     setFatalError('');
     setImportSummary(null);
+    setStockImportSummary(null);
     setDuplicateReviewRows([]);
     setDuplicateRowActions({});
   };
@@ -213,7 +332,14 @@ const ImportWizard: React.FC<Props> = ({ onImported }) => {
   const handleFile = async (selected: File) => {
     setBusy(true);
     setFatalError('');
+    setParseMode('sales');
+    setParseResult(null);
+    setStockPreviewRows([]);
+    setExcludedRowIndexes(new Set());
+    setSelectedInvoiceGroupKey('');
+    setPreviewSearchTerm('');
     setImportSummary(null);
+    setStockImportSummary(null);
 
     try {
       const result = await parseWorkbook(selected);
@@ -236,6 +362,49 @@ const ImportWizard: React.FC<Props> = ({ onImported }) => {
   const runParse = () => {
     if (!workbook) return;
     const sheet = workbook.sheets[selectedSheet];
+
+    if (detection.format === 'inventoryLotsTemplate') {
+      const headerRow = sheet.rows[detection.headerRowIndex] || [];
+      const headers = headerRow.map(cell => String(cell || '').toLowerCase().trim());
+      const productCol = headers.findIndex(header => header.includes('product/service') || header.includes('product') || header.includes('service'));
+      const qtyCol = headers.findIndex(header => header.includes('qty on hand') || header.includes('quantity on hand') || header.includes('qty'));
+
+      const rows: StockPreviewRow[] = [];
+      for (let rowIndex = detection.headerRowIndex + 1; rowIndex < sheet.rows.length; rowIndex++) {
+        const row = sheet.rows[rowIndex] || [];
+        const productName = String(row[productCol >= 0 ? productCol : 0] || '').trim();
+        if (!productName) continue;
+        if (productName.toUpperCase() === 'TOTAL') break;
+
+        rows.push({
+          id: `${rowIndex}_${productName}`,
+          rowNumber: rowIndex + 1,
+          productName,
+          qtyOnHand: Math.max(0, toNumber(row[qtyCol >= 0 ? qtyCol : 4])),
+          skip: false,
+        });
+      }
+
+      if (rows.length === 0) {
+        setFatalError('No stock rows found below the stocktake header row.');
+        return;
+      }
+
+      if (debugMode) {
+        console.log('[import] format detection', detection);
+        console.log('[import] parsed stock rows', rows.length);
+      }
+
+      setParseMode('stock');
+      setParseResult(null);
+      setStockPreviewRows(rows);
+      setSelectedInvoiceGroupKey('');
+      setPreviewSearchTerm('');
+      setStockImportSummary(null);
+      setStep(4);
+      return;
+    }
+
     const result = parseByFormat(sheet.rows, detection.format, {
       fileName: workbook.fileName,
       sheetName: sheet.name,
@@ -247,9 +416,48 @@ const ImportWizard: React.FC<Props> = ({ onImported }) => {
       console.log('[import] parsed transactions', result.transactions.length);
     }
 
+    setParseMode('sales');
     setParseResult(result);
+    setStockPreviewRows([]);
     setExcludedRowIndexes(new Set());
+    setSelectedInvoiceGroupKey('');
+    setPreviewSearchTerm('');
+    setStockImportSummary(null);
     setStep(4);
+  };
+
+  const selectSelectedInvoiceRows = () => {
+    if (!selectedInvoiceGroup) return;
+    setExcludedRowIndexes(prev => {
+      const next = new Set(prev);
+      for (const rowIndex of selectedInvoiceGroup.indices) {
+        next.delete(rowIndex);
+      }
+      return next;
+    });
+  };
+
+  const deselectSelectedInvoiceRows = () => {
+    if (!selectedInvoiceGroup) return;
+    setExcludedRowIndexes(prev => {
+      const next = new Set(prev);
+      for (const rowIndex of selectedInvoiceGroup.indices) {
+        next.add(rowIndex);
+      }
+      return next;
+    });
+  };
+
+  const toggleStockPreviewRow = (rowId: string) => {
+    setStockPreviewRows(prev => prev.map(row => row.id === rowId ? { ...row, skip: !row.skip } : row));
+  };
+
+  const selectAllStockRows = () => {
+    setStockPreviewRows(prev => prev.map(row => ({ ...row, skip: false })));
+  };
+
+  const deselectAllStockRows = () => {
+    setStockPreviewRows(prev => prev.map(row => ({ ...row, skip: true })));
   };
 
   const togglePreviewRow = (index: number) => {
@@ -278,6 +486,16 @@ const ImportWizard: React.FC<Props> = ({ onImported }) => {
   };
 
   const continueToConfirm = () => {
+    if (parseMode === 'stock') {
+      if (selectedStockRows.length === 0) {
+        setFatalError('Select at least one stock row to continue.');
+        return;
+      }
+      setFatalError('');
+      setStep(6);
+      return;
+    }
+
     if (!parseResult) return;
     if (selectedTransactions.length === 0) {
       setFatalError('Select at least one preview row to continue.');
@@ -314,6 +532,91 @@ const ImportWizard: React.FC<Props> = ({ onImported }) => {
 
   const continueFromDuplicateReview = () => {
     setStep(6);
+  };
+
+  const executeStockImport = async () => {
+    if (!workbook) return;
+    if (selectedStockRows.length === 0) {
+      setFatalError('Select at least one stock row to import.');
+      return;
+    }
+
+    setBusy(true);
+    setFatalError('');
+
+    try {
+      const existingLots = await db.getAll<InventoryLot>('lots');
+      const existingItems = await db.getAll<Item>('items');
+      const itemByName = new Map(existingItems.map(item => [normalizeText(item.name), item]));
+      const now = new Date().toISOString();
+      const today = now.split('T')[0];
+
+      let itemsCreated = 0;
+      let lotsCreated = 0;
+
+      for (const row of selectedStockRows) {
+        const itemKey = normalizeText(row.productName);
+        let item = itemByName.get(itemKey);
+
+        if (!item) {
+          item = {
+            id: uid(),
+            skuCode: `AUTO-${row.productName.replace(/[^a-zA-Z0-9]+/g, '-').toUpperCase().slice(0, 24)}`,
+            name: row.productName,
+            category: 'Other',
+            packSize: 1,
+            leadTimeDays: 14,
+            moq: 0,
+            costPerUnit: 0,
+          };
+          await db.put('items', item);
+          itemByName.set(itemKey, item);
+          itemsCreated += 1;
+        }
+
+        const activeLots = existingLots.filter(lot => lot.itemId === item!.id && lot.status === 'available');
+        for (const lot of activeLots) {
+          await db.put('lots', { ...lot, quantityRemaining: 0 });
+        }
+
+        if (row.qtyOnHand > 0) {
+          const newLot: InventoryLot = {
+            id: uid(),
+            itemId: item.id,
+            lotNumber: `STOCKTAKE-${today}-${uid().slice(-4).toUpperCase()}`,
+            expiryDate: null,
+            quantityRemaining: row.qtyOnHand,
+            receivedDate: today,
+            quantityReceived: row.qtyOnHand,
+            status: 'available',
+            notes: `Imported from stocktake worksheet: ${workbook.fileName}`,
+          };
+          await db.put('lots', newLot);
+          lotsCreated += 1;
+        }
+      }
+
+      const batch: ImportBatchV5 = {
+        id: uid(),
+        fileName: workbook.fileName,
+        sheetName: workbook.sheets[selectedSheet].name,
+        formatDetected: 'inventoryLotsTemplate',
+        confidence: detection.confidence,
+        rowCountRaw: selectedStockRows.length,
+        ordersCreated: 0,
+        linesCreated: lotsCreated,
+        warnings: [],
+        createdAt: now,
+      };
+      await db.put('import_batches', batch);
+
+      setStockImportSummary({ rowsApplied: selectedStockRows.length, lotsCreated, itemsCreated });
+      if (onImported) await onImported();
+    } catch (err: any) {
+      setFatalError(err?.message || 'Stock import failed.');
+    } finally {
+      setBusy(false);
+    }
   };
 
   const executeImport = async () => {
@@ -557,6 +860,12 @@ const ImportWizard: React.FC<Props> = ({ onImported }) => {
         <p className="text-slate-500">Professional Excel import pipeline with auto detection, preview, and safe import.</p>
       </div>
 
+      <div className="p-3 rounded-xl border border-blue-200 bg-blue-50 text-blue-800 text-sm">
+        <p><b>What to upload where:</b></p>
+        <p>• <b>Stock Take tab</b>: Xero Stocktake Worksheet (best for current stock on hand updates).</p>
+        <p>• <b>Import Wizard</b>: Sales/order transaction files. Stocktake worksheets are also supported here.</p>
+      </div>
+
       {fatalError && (
         <div className="p-4 rounded-xl border border-red-200 bg-red-50 text-red-700 text-sm flex items-center">
           <AlertTriangle size={16} className="mr-2" /> {fatalError}
@@ -642,7 +951,7 @@ const ImportWizard: React.FC<Props> = ({ onImported }) => {
         </div>
       )}
 
-      {step === 4 && parseResult && (
+      {step === 4 && parseMode === 'sales' && parseResult && (
         <div className="bg-white rounded-2xl border border-slate-200 p-6 space-y-4">
           <div className="flex items-center justify-between">
             <h3 className="text-xl font-bold text-slate-800">Preview (first 50 rows)</h3>
@@ -653,6 +962,87 @@ const ImportWizard: React.FC<Props> = ({ onImported }) => {
             <button onClick={selectAllPreviewRows} className="px-3 py-1.5 border rounded-lg text-slate-600">Select all</button>
             <button onClick={deselectAllPreviewRows} className="px-3 py-1.5 border rounded-lg text-slate-600">Deselect all</button>
             <span className="text-slate-500">Selected for upload: <b>{selectedTransactions.length}</b> / {parseResult.transactions.length}</span>
+          </div>
+
+          {invoiceSelectionGroups.length > 0 && (
+            <div className="p-3 rounded-xl border border-slate-200 bg-slate-50">
+              <p className="text-xs text-slate-600 mb-2">Invoice selection</p>
+              <div className="flex flex-col md:flex-row md:items-center gap-2">
+                <select
+                  className="border rounded-lg px-3 py-2 text-sm bg-white md:min-w-[420px]"
+                  value={selectedInvoiceGroupKey}
+                  onChange={(event) => setSelectedInvoiceGroupKey(event.target.value)}
+                >
+                  {invoiceSelectionGroups.map(group => (
+                    <option key={group.key} value={group.key}>
+                      {group.invoice} • {group.customerName} • {group.date} ({group.selectedRows}/{group.totalRows} selected)
+                    </option>
+                  ))}
+                </select>
+                <button
+                  onClick={selectSelectedInvoiceRows}
+                  disabled={!selectedInvoiceGroup}
+                  className="px-3 py-2 border rounded-lg text-xs text-slate-600 bg-white disabled:opacity-50"
+                >
+                  Select invoice
+                </button>
+                <button
+                  onClick={deselectSelectedInvoiceRows}
+                  disabled={!selectedInvoiceGroup}
+                  className="px-3 py-2 border rounded-lg text-xs text-slate-600 bg-white disabled:opacity-50"
+                >
+                  Deselect invoice
+                </button>
+              </div>
+
+              {selectedInvoiceGroup && selectedInvoiceLines.length > 0 && (
+                <div className="mt-3 border rounded-xl bg-white overflow-x-auto">
+                  <table className="w-full text-xs">
+                    <thead className="bg-slate-50">
+                      <tr>
+                        {['Select', 'Product', 'Qty', 'Amount'].map(header => (
+                          <th key={header} className="text-left px-3 py-2 uppercase text-slate-500">{header}</th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {selectedInvoiceLines.map(({ row, index }) => {
+                        const isSelected = !excludedRowIndexes.has(index);
+                        return (
+                          <tr
+                            key={`invoice-line-${index}`}
+                            className={`border-t cursor-pointer ${isSelected ? '' : 'bg-slate-100 text-slate-400 line-through'}`}
+                            onClick={() => togglePreviewRow(index)}
+                          >
+                            <td className="px-3 py-2">
+                              <input
+                                type="checkbox"
+                                checked={isSelected}
+                                onClick={(event) => event.stopPropagation()}
+                                onChange={() => togglePreviewRow(index)}
+                              />
+                            </td>
+                            <td className="px-3 py-2">{row.productService || '—'}</td>
+                            <td className="px-3 py-2">{row.quantity}</td>
+                            <td className="px-3 py-2">{row.amount}</td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+          )}
+
+          <div className="relative">
+            <Search size={14} className="absolute left-3 top-3 text-slate-400" />
+            <input
+              value={previewSearchTerm}
+              onChange={(event) => setPreviewSearchTerm(event.target.value)}
+              placeholder="Search product, customer, invoice, or date"
+              className="w-full pl-9 pr-3 py-2 border rounded-lg text-sm"
+            />
           </div>
 
           <div className="grid grid-cols-1 md:grid-cols-3 gap-3 text-sm">
@@ -671,11 +1061,11 @@ const ImportWizard: React.FC<Props> = ({ onImported }) => {
                 </tr>
               </thead>
               <tbody>
-                {parseResult.transactions.slice(0, 50).map((row, index) => {
+                {previewRowsForTable.map(({ row, index }) => {
                   const isSelected = !excludedRowIndexes.has(index);
                   return (
                   <tr
-                    key={index}
+                    key={`preview-row-${index}`}
                     className={`border-t cursor-pointer ${isSelected ? 'bg-white' : 'bg-slate-100 text-slate-400 line-through'}`}
                     onClick={() => togglePreviewRow(index)}
                   >
@@ -696,6 +1086,11 @@ const ImportWizard: React.FC<Props> = ({ onImported }) => {
                   </tr>
                   );
                 })}
+                {previewRowsForTable.length === 0 && (
+                  <tr className="border-t">
+                    <td colSpan={7} className="px-3 py-4 text-center text-slate-400">No rows match your search.</td>
+                  </tr>
+                )}
               </tbody>
             </table>
           </div>
@@ -726,7 +1121,66 @@ const ImportWizard: React.FC<Props> = ({ onImported }) => {
         </div>
       )}
 
-      {step === 5 && parseResult && (
+      {step === 4 && parseMode === 'stock' && (
+        <div className="bg-white rounded-2xl border border-slate-200 p-6 space-y-4">
+          <div className="flex items-center justify-between">
+            <h3 className="text-xl font-bold text-slate-800">Stocktake Preview</h3>
+          </div>
+
+          <div className="p-3 rounded-xl border border-blue-200 bg-blue-50 text-blue-800 text-xs">
+            Upload type detected: <b>Stocktake Worksheet</b>. This will update current stock on hand.
+          </div>
+
+          <div className="flex items-center gap-2 text-xs">
+            <button onClick={selectAllStockRows} className="px-3 py-1.5 border rounded-lg text-slate-600">Select all</button>
+            <button onClick={deselectAllStockRows} className="px-3 py-1.5 border rounded-lg text-slate-600">Deselect all</button>
+            <span className="text-slate-500">Selected for upload: <b>{selectedStockRows.length}</b> / {stockPreviewRows.length}</span>
+          </div>
+
+          <div className="overflow-x-auto border rounded-xl max-h-[420px]">
+            <table className="w-full text-sm">
+              <thead className="bg-slate-50 sticky top-0">
+                <tr>
+                  {['Select', 'Row', 'Product', 'Qty on Hand'].map(header => (
+                    <th key={header} className="text-left px-3 py-2 text-xs uppercase text-slate-500">{header}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {stockPreviewRows.map((row) => (
+                  <tr
+                    key={row.id}
+                    className={`border-t cursor-pointer ${row.skip ? 'bg-slate-100 text-slate-400 line-through' : 'bg-white'}`}
+                    onClick={() => toggleStockPreviewRow(row.id)}
+                  >
+                    <td className="px-3 py-2">
+                      <input
+                        type="checkbox"
+                        checked={!row.skip}
+                        onChange={() => toggleStockPreviewRow(row.id)}
+                        onClick={(event) => event.stopPropagation()}
+                      />
+                    </td>
+                    <td className="px-3 py-2">{row.rowNumber}</td>
+                    <td className="px-3 py-2">{row.productName}</td>
+                    <td className="px-3 py-2">{row.qtyOnHand}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          <button
+            onClick={continueToConfirm}
+            disabled={selectedStockRows.length === 0}
+            className="px-5 py-2 bg-blue-600 text-white rounded-lg font-semibold disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            Continue
+          </button>
+        </div>
+      )}
+
+      {step === 5 && parseMode === 'sales' && parseResult && (
         <div className="bg-white rounded-2xl border border-slate-200 p-6 space-y-4">
           <h3 className="text-xl font-bold text-slate-800">Duplicate Review</h3>
 
@@ -841,7 +1295,7 @@ const ImportWizard: React.FC<Props> = ({ onImported }) => {
         </div>
       )}
 
-      {step === 6 && parseResult && (
+      {step === 6 && parseMode === 'sales' && parseResult && (
         <div className="bg-white rounded-2xl border border-slate-200 p-6 space-y-4">
           <h3 className="text-xl font-bold text-slate-800">Confirm Import</h3>
 
@@ -903,6 +1357,35 @@ const ImportWizard: React.FC<Props> = ({ onImported }) => {
             <div className="p-4 rounded-xl border border-green-200 bg-green-50 text-green-700 text-sm flex items-center">
               <CheckCircle size={16} className="mr-2" />
               Imported {importSummary.ordersCreated} orders and {importSummary.linesCreated} lines (duplicates matched: {importSummary.duplicates}).
+            </div>
+          )}
+        </div>
+      )}
+
+      {step === 6 && parseMode === 'stock' && (
+        <div className="bg-white rounded-2xl border border-slate-200 p-6 space-y-4">
+          <h3 className="text-xl font-bold text-slate-800">Confirm Stock Import</h3>
+
+          <div className="p-3 rounded-xl border border-slate-200 bg-slate-50 text-sm">
+            <p>Selected rows: <b>{selectedStockRows.length}</b></p>
+            <p className="text-slate-600 mt-1">This applies the worksheet as a current stock snapshot by zeroing existing available lots per selected product and creating a new stocktake lot.</p>
+          </div>
+
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => void executeStockImport()}
+              disabled={busy || selectedStockRows.length === 0}
+              className="px-5 py-2 bg-green-600 text-white rounded-lg font-semibold disabled:opacity-50"
+            >
+              {busy ? 'Importing...' : 'Import Stock Snapshot'}
+            </button>
+            <button onClick={reset} className="px-5 py-2 border rounded-lg font-semibold text-slate-600">Cancel</button>
+          </div>
+
+          {stockImportSummary && (
+            <div className="p-4 rounded-xl border border-green-200 bg-green-50 text-green-700 text-sm flex items-center">
+              <CheckCircle size={16} className="mr-2" />
+              Applied {stockImportSummary.rowsApplied} stock rows, created {stockImportSummary.lotsCreated} lots, and created {stockImportSummary.itemsCreated} new items.
             </div>
           )}
         </div>

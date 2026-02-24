@@ -36,13 +36,14 @@ export function detectFormat(rows: any[][]): FormatDetectionResult {
     };
   }
 
-  const invHeaders = ['product/service', 'qty on hand'];
-  const inv = findHeader(rows, invHeaders);
+  const invQty = findHeader(rows, ['product/service', 'qty on hand']);
+  const invQuantity = findHeader(rows, ['product/service', 'quantity on hand']);
+  const inv = invQty.headerRowIndex >= 0 ? invQty : invQuantity;
   if (inv.headerRowIndex >= 0) {
     return {
       format: 'inventoryLotsTemplate',
       confidence: 88,
-      reason: 'Header row with "Product/Service" and "Qty on Hand" found',
+      reason: 'Header row with "Product/Service" and stock quantity column found',
       headerRowIndex: inv.headerRowIndex,
       columnMap: inv.columnMap,
     };
