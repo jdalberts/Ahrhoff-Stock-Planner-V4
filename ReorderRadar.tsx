@@ -25,11 +25,13 @@ Suggested Order: ${v.suggestedOrderQty} units`;
   /* FIX (Bug 3): CSV export now wraps values in quotes to handle commas in item names.
      Also cleans up the temporary DOM link element after download. */
   const exportCSV = () => {
-    const headers = ['SKU', 'Item Name', 'Available Stock', 'Suggested Qty', 'Estimated Cost'];
+    const headers = ['SKU', 'Item Name', 'Current Stock', 'In Transit', 'Effective Stock', 'Suggested Qty', 'Estimated Cost'];
     const rows = orderItems.map(v => [
       `"${v.item.skuCode}"`,
       `"${v.item.name}"`,
       v.availableStock,
+      v.inTransitStock,
+      v.availableStock + v.inTransitStock,
       v.suggestedOrderQty,
       (v.suggestedOrderQty * v.item.costPerUnit).toFixed(2)
     ]);
@@ -76,7 +78,9 @@ Suggested Order: ${v.suggestedOrderQty} units`;
             <thead>
               <tr className="bg-slate-50 border-b border-slate-100">
                 <th className="px-6 py-4 font-semibold text-slate-500 text-sm">Item</th>
-                <th className="px-6 py-4 font-semibold text-slate-500 text-sm">Stock Status</th>
+                <th className="px-6 py-4 font-semibold text-slate-500 text-sm">Current Stock</th>
+                <th className="px-6 py-4 font-semibold text-slate-500 text-sm">In Transit</th>
+                <th className="px-6 py-4 font-semibold text-slate-500 text-sm">Effective Stock</th>
                 <th className="px-6 py-4 font-semibold text-slate-500 text-sm">Forecasting</th>
                 <th className="px-6 py-4 font-semibold text-slate-500 text-sm">Suggested Order</th>
                 <th className="px-6 py-4 font-semibold text-slate-500 text-sm text-right">Actions</th>
@@ -91,8 +95,14 @@ Suggested Order: ${v.suggestedOrderQty} units`;
                       <div className="text-xs text-slate-400 font-mono">{v.item.skuCode}</div>
                     </td>
                     <td className="px-6 py-4">
+                      <div className="text-slate-700 font-bold">{v.availableStock} units</div>
+                    </td>
+                    <td className="px-6 py-4">
+                      <div className="text-blue-700 font-bold">{v.inTransitStock} units</div>
+                    </td>
+                    <td className="px-6 py-4">
                       <div className="flex flex-col">
-                        <span className="text-slate-700 font-bold">{v.availableStock} units</span>
+                        <span className="text-slate-700 font-bold">{v.availableStock + v.inTransitStock} units</span>
                         <span className={`text-xs font-bold uppercase ${v.lowStockFlag ? 'text-red-500' : 'text-slate-400'}`}>
                           {v.daysCover === 999 ? 'No Demand' : `${Math.round(v.daysCover)} Days Cover`}
                         </span>
@@ -153,13 +163,15 @@ Suggested Order: ${v.suggestedOrderQty} units`;
                   {/* Logic Explanation Panel */}
                   {showExplanation === v.item.id && (
                     <tr className="bg-blue-50/30">
-                      <td colSpan={5} className="px-8 py-6">
+                      <td colSpan={7} className="px-8 py-6">
                         <div className="grid grid-cols-1 md:grid-cols-3 gap-8 text-sm text-slate-600 border-l-4 border-blue-400 pl-6">
                           <div>
                             <p className="font-bold text-blue-800 mb-2 uppercase tracking-wider text-xs">Reorder Math</p>
                             <ul className="space-y-1">
                               <li>Daily Demand: {v.dailyDemand.toFixed(2)}</li>
                               <li>Lead Time Days: {v.item.leadTimeDays || settings.defaultLeadTimeDays}</li>
+                              <li>Current Stock: {v.availableStock}</li>
+                              <li>In Transit: {v.inTransitStock}</li>
                               <li>
                                 Safety Stock Needed: {v.safetyStock.toFixed(0)}
                                 <span title="Safety Stock = dailyDemand × safetyStockDays (from Settings)" className="inline-flex items-center text-slate-400 ml-2">
@@ -200,7 +212,7 @@ Suggested Order: ${v.suggestedOrderQty} units`;
               ))}
               {orderItems.length === 0 && (
                 <tr>
-                  <td colSpan={5} className="px-6 py-20 text-center text-slate-400 font-medium">
+                  <td colSpan={7} className="px-6 py-20 text-center text-slate-400 font-medium">
                     <ShoppingCart className="mx-auto mb-3 opacity-20" size={48} />
                     All stock levels currently sufficient.
                   </td>

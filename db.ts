@@ -1,6 +1,6 @@
 export class AgriDB {
   private dbName = 'AgriStockDB';
-  private version = 4;
+  private version = 5;
   private dbPromise: Promise<IDBDatabase> | null = null;
 
   async init(): Promise<IDBDatabase> {
@@ -22,6 +22,7 @@ export class AgriDB {
           if (!database.objectStoreNames.contains('order_lines')) database.createObjectStore('order_lines', { keyPath: 'id' });
           if (!database.objectStoreNames.contains('products')) database.createObjectStore('products', { keyPath: 'id' });
           if (!database.objectStoreNames.contains('import_batches')) database.createObjectStore('import_batches', { keyPath: 'id' });
+          if (!database.objectStoreNames.contains('transit_containers')) database.createObjectStore('transit_containers', { keyPath: 'id' });
         };
 
         request.onsuccess = () => resolve(request.result);

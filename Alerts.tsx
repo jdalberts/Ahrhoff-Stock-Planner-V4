@@ -1,13 +1,16 @@
 import React, { useState, useMemo, useEffect } from 'react';
-import { Package, AlertTriangle, Info } from 'lucide-react';
+import { Package, AlertTriangle, Info, Truck } from 'lucide-react';
 import { LEAD_TIME_WEEKS, KG_PER_PALLET, PALLETS_PER_CONTAINER } from './productCatalog';
 import { db } from './db';
-import { Item, InventoryLot, SalesHistory } from './types';
+import { Item, InventoryLot, SalesHistory, TransitContainer, TransitContainerLine, TransitContainerStatus } from './types';
 
 // ── Types ──
 interface PlanRow {
+  itemId: string;
   name: string;
   stock: number;
+  inTransitStock: number;
+  effectiveStock: number;
   avgMonthly: number;
   dailyDemand: number;
   seasonal: number;
@@ -29,7 +32,12 @@ function fmtKg(v: number): string {
   if (Math.abs(v) >= 1000) return (v / 1000).toFixed(1) + 't';
   return Math.round(v) + ' kg';
 }
-function getProductBase(items: Item[], lots: InventoryLot[], sales: SalesHistory[]) {
+function getProductBase(
+  items: Item[],
+  lots: InventoryLot[],
+  sales: SalesHistory[],
+  inTransitByItem: Record<string, number>
+) {
   const leadTimeDays = LEAD_TIME_WEEKS * 7;
   const reorderPointDays = leadTimeDays + 14;
 
@@ -43,14 +51,22 @@ function getProductBase(items: Item[], lots: InventoryLot[], sales: SalesHistory
     const stock = lots
       .filter(l => l.itemId === item.id && l.status === 'available')
       .reduce((acc, lot) => acc + Number(lot.quantityRemaining || 0), 0);
-    const daysCover = dailyDemand > 0 ? Math.min(stock / dailyDemand, 999) : 999;
+    const inTransitStock = Math.max(0, Number(inTransitByItem[item.id] || 0));
+    const effectiveStock = stock + inTransitStock;
+    const daysCover = dailyDemand > 0 ? Math.min(effectiveStock / dailyDemand, 999) : 999;
     const shelfLife = item.shelfLifeDays || 365;
     let status: 'overdue' | 'due_soon' | 'on_track' = 'on_track';
     if (daysCover < leadTimeDays) status = 'overdue';
     else if (daysCover < reorderPointDays) status = 'due_soon';
     return {
+      itemId: item.id,
       name: item.name,
-      stock, avgMonthly, dailyDemand, shelfLife,
+      stock,
+      inTransitStock,
+      effectiveStock,
+      avgMonthly,
+      dailyDemand,
+      shelfLife,
       shelfLifeMonths: Math.round(shelfLife / 30), status,
       category: item.category,
     };
@@ -78,19 +94,30 @@ const ContainerPlanner: React.FC = () => {
   const [items, setItems] = useState<Item[]>([]);
   const [lots, setLots] = useState<InventoryLot[]>([]);
   const [sales, setSales] = useState<SalesHistory[]>([]);
+  const [transitContainers, setTransitContainers] = useState<TransitContainer[]>([]);
   const [loading, setLoading] = useState(true);
+  const [savingTransit, setSavingTransit] = useState(false);
+  const [transitError, setTransitError] = useState<string | null>(null);
+  const [meta, setMeta] = useState<{ orderNumber: string; shipName: string; eta: string; status: TransitContainerStatus }>({
+    orderNumber: '',
+    shipName: '',
+    eta: '',
+    status: 'on_po',
+  });
 
   useEffect(() => {
     const loadData = async () => {
       try {
-        const [dbItems, dbLots, dbSales] = await Promise.all([
+        const [dbItems, dbLots, dbSales, dbTransit] = await Promise.all([
           db.getAll<Item>('items'),
           db.getAll<InventoryLot>('lots'),
           db.getAll<SalesHistory>('sales'),
+          db.getAll<TransitContainer>('transit_containers'),
         ]);
         setItems(dbItems);
         setLots(dbLots);
         setSales(dbSales);
+        setTransitContainers(dbTransit);
       } catch (err) {
         console.error('Failed to load container planner data.', err);
       } finally {
@@ -100,26 +127,53 @@ const ContainerPlanner: React.FC = () => {
     loadData();
   }, []);
 
-  const baseProducts = useMemo(() => getProductBase(items, lots, sales), [items, lots, sales]);
+  const inTransitByItem = useMemo(() => {
+    const totals: Record<string, number> = {};
+    for (const container of transitContainers) {
+      if (container.status === 'received') continue;
+      for (const line of container.lines || []) {
+        totals[line.itemId] = (totals[line.itemId] || 0) + Number(line.quantityKg || 0);
+      }
+    }
+    return totals;
+  }, [transitContainers]);
+
+  const activeTransitContainers = useMemo(() => {
+    return transitContainers
+      .filter(c => c.status !== 'received')
+      .sort((a, b) => new Date(a.eta).getTime() - new Date(b.eta).getTime());
+  }, [transitContainers]);
+
+  const baseProducts = useMemo(() => getProductBase(items, lots, sales, inTransitByItem), [items, lots, sales, inTransitByItem]);
   const [safetyPct, setSafetyPct] = useState(15);
   const [seasonals, setSeasonals] = useState<Record<string, number>>(() => {
     const m: Record<string, number> = {};
-    baseProducts.forEach(p => { m[p.name] = 1.0; });
+    baseProducts.forEach(p => { m[p.itemId] = 1.0; });
     return m;
   });
   const [overrides, setOverrides] = useState<Record<string, number>>({});
 
+  useEffect(() => {
+    setSeasonals(prev => {
+      const next = { ...prev };
+      for (const product of baseProducts) {
+        if (next[product.itemId] === undefined) next[product.itemId] = 1.0;
+      }
+      return next;
+    });
+  }, [baseProducts]);
+
   const planRows: PlanRow[] = useMemo(() => {
     return baseProducts.map(p => {
-      const seasonal = seasonals[p.name] ?? 1.0;
+      const seasonal = seasonals[p.itemId] ?? 1.0;
       const safetyMult = 1 + safetyPct / 100;
       const forecastWeekly = (p.avgMonthly / 4.33) * seasonal * safetyMult;
       const forecast8w = forecastWeekly * 8;
-      const need = Math.max(0, forecast8w - p.stock);
+      const need = Math.max(0, forecast8w - p.effectiveStock);
       const pallets = Math.ceil(need / KG_PER_PALLET);
-      const overridePallets = overrides[p.name] !== undefined ? overrides[p.name] : pallets;
+      const overridePallets = overrides[p.itemId] !== undefined ? overrides[p.itemId] : pallets;
       const overrideKg = overridePallets * KG_PER_PALLET;
-      const totalAfterOrder = p.stock + overrideKg;
+      const totalAfterOrder = p.effectiveStock + overrideKg;
       const weeksOfStock = p.dailyDemand > 0 ? totalAfterOrder / (p.dailyDemand * 7) : 999;
       const shelfWeeks = p.shelfLife / 7;
       return {
@@ -129,7 +183,7 @@ const ContainerPlanner: React.FC = () => {
         pallets: overridePallets,
         kg: overrideKg,
         shelfAlert: weeksOfStock > shelfWeeks && overridePallets > 0,
-        isOverride: overrides[p.name] !== undefined,
+        isOverride: overrides[p.itemId] !== undefined,
       };
     });
   }, [baseProducts, safetyPct, seasonals, overrides]);
@@ -156,15 +210,96 @@ const ContainerPlanner: React.FC = () => {
     );
   }
 
-  const updateSeasonal = (name: string, val: string) => {
-    setSeasonals(prev => ({ ...prev, [name]: parseFloat(val) || 1 }));
+  const updateSeasonal = (itemId: string, val: string) => {
+    setSeasonals(prev => ({ ...prev, [itemId]: parseFloat(val) || 1 }));
   };
-  const updateOverride = (name: string, val: string) => {
+  const updateOverride = (itemId: string, val: string) => {
     const num = parseInt(val);
     if (val === '' || isNaN(num)) {
-      setOverrides(prev => { const n = { ...prev }; delete n[name]; return n; });
+      setOverrides(prev => { const n = { ...prev }; delete n[itemId]; return n; });
     } else {
-      setOverrides(prev => ({ ...prev, [name]: Math.max(0, num) }));
+      setOverrides(prev => ({ ...prev, [itemId]: Math.max(0, num) }));
+    }
+  };
+
+  const refreshTransitContainers = async () => {
+    const fresh = await db.getAll<TransitContainer>('transit_containers');
+    setTransitContainers(fresh);
+  };
+
+  const validateTransitMeta = (): boolean => {
+    if (!meta.orderNumber.trim() || !meta.shipName.trim() || !meta.eta) {
+      setTransitError('Order number, ship name, and ETA are required.');
+      return false;
+    }
+    setTransitError(null);
+    return true;
+  };
+
+  const saveTransitContainer = async (source: 'manual' | 'builder', lines: TransitContainerLine[]) => {
+    if (!validateTransitMeta()) return;
+
+    setSavingTransit(true);
+    try {
+      const now = new Date().toISOString();
+      const container: TransitContainer = {
+        id: typeof crypto !== 'undefined' && 'randomUUID' in crypto
+          ? crypto.randomUUID()
+          : `tc_${Date.now()}`,
+        orderNumber: meta.orderNumber.trim(),
+        shipName: meta.shipName.trim(),
+        eta: meta.eta,
+        status: meta.status,
+        source,
+        lines,
+        createdAt: now,
+        updatedAt: now,
+      };
+      await db.put('transit_containers', container);
+      await refreshTransitContainers();
+      setTransitError(null);
+      setMeta(prev => ({ ...prev, orderNumber: '', shipName: '', eta: '' }));
+    } catch (err) {
+      console.error('Failed to save transit container.', err);
+      setTransitError('Failed to save container entry.');
+    } finally {
+      setSavingTransit(false);
+    }
+  };
+
+  const addManualContainer = async () => {
+    await saveTransitContainer('manual', []);
+  };
+
+  const addBuilderContainer = async () => {
+    const lines: TransitContainerLine[] = planRows
+      .filter(row => row.pallets > 0)
+      .map(row => ({
+        itemId: row.itemId,
+        itemName: row.name,
+        pallets: row.pallets,
+        quantityKg: row.pallets * KG_PER_PALLET,
+      }));
+
+    if (lines.length === 0) {
+      setTransitError('No pallets in the current builder plan to finalize.');
+      return;
+    }
+
+    await saveTransitContainer('builder', lines);
+  };
+
+  const updateContainerStatus = async (container: TransitContainer, status: TransitContainerStatus) => {
+    try {
+      await db.put('transit_containers', {
+        ...container,
+        status,
+        updatedAt: new Date().toISOString(),
+      });
+      await refreshTransitContainers();
+    } catch (err) {
+      console.error('Failed to update transit container status.', err);
+      setTransitError('Failed to update container status.');
     }
   };
 
@@ -184,7 +319,8 @@ const ContainerPlanner: React.FC = () => {
   }
 
   return (
-    <div className="space-y-6">
+    <div className="grid grid-cols-1 xl:grid-cols-3 gap-6">
+      <div className="space-y-6 xl:col-span-2">
       {/* Header */}
       <div>
         <h2 className="text-3xl font-bold text-slate-800 mb-2">Container Planner</h2>
@@ -263,11 +399,16 @@ const ContainerPlanner: React.FC = () => {
                     <StatusDot status={r.status} />
                     {r.name}
                   </td>
-                  <td className="px-4 py-3 text-slate-500">{fmtKg(r.stock)}</td>
+                  <td className="px-4 py-3 text-slate-500">
+                    {fmtKg(r.stock)}
+                    {r.inTransitStock > 0 && (
+                      <div className="text-[10px] text-blue-600 font-semibold mt-1">+ {fmtKg(r.inTransitStock)} in transit</div>
+                    )}
+                  </td>
                   <td className="px-4 py-3 text-slate-500">{fmtKg(r.avgMonthly)}</td>
                   <td className="px-4 py-3">
                     <input type="number" step="0.1" min="0" max="3" value={r.seasonal}
-                      onChange={e => updateSeasonal(r.name, e.target.value)}
+                      onChange={e => updateSeasonal(r.itemId, e.target.value)}
                       className={`w-14 px-1.5 py-1 rounded border text-center text-xs font-medium focus:outline-none focus:ring-1 focus:ring-green-500
                         ${r.seasonal !== 1 ? 'bg-purple-50 border-purple-300 text-purple-700 font-semibold' : 'border-slate-200 text-slate-600'}
                       `}
@@ -279,8 +420,8 @@ const ContainerPlanner: React.FC = () => {
                   </td>
                   <td className="px-4 py-3">
                     <input type="number" min="0" max="20"
-                      value={r.isOverride ? overrides[r.name] : r.suggestedPallets}
-                      onChange={e => updateOverride(r.name, e.target.value)}
+                      value={r.isOverride ? overrides[r.itemId] : r.suggestedPallets}
+                      onChange={e => updateOverride(r.itemId, e.target.value)}
                       className={`w-12 px-1.5 py-1 rounded text-center text-sm font-bold focus:outline-none focus:ring-1 focus:ring-green-500
                         ${r.isOverride ? 'bg-purple-50 border-2 border-purple-400 text-purple-700' : 'border-2 border-green-500 text-green-700'}
                       `}
@@ -325,6 +466,145 @@ const ContainerPlanner: React.FC = () => {
         All values are suggestions — you can override every pallet count and seasonal multiplier.
         Forecasts use 6-month avg + safety % + seasonal adjustment.
       </p>
+
+      </div>
+
+      <aside className="bg-white rounded-2xl border border-slate-200 shadow-sm p-5 space-y-5 h-fit">
+        <div className="flex items-center gap-2">
+          <Truck size={18} className="text-blue-600" />
+          <h3 className="text-lg font-bold text-slate-800">PO / In Transit</h3>
+        </div>
+
+        <div className="text-xs text-slate-500 bg-slate-50 rounded-lg border border-slate-200 p-3">
+          Add manual container entries or finalize the current builder output into this list. Active entries feed stock planning automatically.
+        </div>
+
+        <div className="space-y-3">
+          <div>
+            <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-1">Order Number</label>
+            <input
+              type="text"
+              value={meta.orderNumber}
+              onChange={e => setMeta(prev => ({ ...prev, orderNumber: e.target.value }))}
+              className="w-full px-3 py-2 border rounded-lg text-sm"
+              placeholder="PO-00123"
+            />
+          </div>
+          <div>
+            <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-1">Ship Name</label>
+            <input
+              type="text"
+              value={meta.shipName}
+              onChange={e => setMeta(prev => ({ ...prev, shipName: e.target.value }))}
+              className="w-full px-3 py-2 border rounded-lg text-sm"
+              placeholder="MV Horizon"
+            />
+          </div>
+          <div>
+            <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-1">ETA</label>
+            <input
+              type="date"
+              value={meta.eta}
+              onChange={e => setMeta(prev => ({ ...prev, eta: e.target.value }))}
+              className="w-full px-3 py-2 border rounded-lg text-sm"
+            />
+          </div>
+          <div>
+            <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-1">Status</label>
+            <select
+              value={meta.status}
+              onChange={e => setMeta(prev => ({ ...prev, status: e.target.value as TransitContainerStatus }))}
+              className="w-full px-3 py-2 border rounded-lg text-sm"
+            >
+              <option value="on_po">On PO</option>
+              <option value="on_the_way">On the Way</option>
+            </select>
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+            <button
+              onClick={() => void addManualContainer()}
+              disabled={savingTransit}
+              className="px-3 py-2 rounded-lg bg-blue-600 text-white text-sm font-semibold hover:bg-blue-700 disabled:opacity-60"
+            >
+              {savingTransit ? 'Saving...' : 'Add Manual'}
+            </button>
+            <button
+              onClick={() => void addBuilderContainer()}
+              disabled={savingTransit}
+              className="px-3 py-2 rounded-lg bg-green-600 text-white text-sm font-semibold hover:bg-green-700 disabled:opacity-60"
+            >
+              Finalize Builder
+            </button>
+          </div>
+
+          {transitError && (
+            <div className="text-xs text-red-600 bg-red-50 border border-red-200 rounded-lg px-3 py-2">{transitError}</div>
+          )}
+        </div>
+
+        <div className="border-t border-slate-200 pt-4 space-y-3">
+          <div className="flex items-center justify-between">
+            <p className="text-xs font-bold uppercase tracking-wider text-slate-500">Active Containers</p>
+            <p className="text-xs text-slate-500">{activeTransitContainers.length}</p>
+          </div>
+
+          {activeTransitContainers.length === 0 && (
+            <div className="text-sm text-slate-500 bg-slate-50 rounded-lg border border-slate-200 p-3">
+              No containers currently on PO or on the way.
+            </div>
+          )}
+
+          {activeTransitContainers.map(container => {
+            const totalKg = (container.lines || []).reduce((sum, line) => sum + Number(line.quantityKg || 0), 0);
+            const totalPallets = (container.lines || []).reduce((sum, line) => sum + Number(line.pallets || 0), 0);
+            const statusLabel = container.status === 'on_po' ? 'On PO' : 'On the Way';
+            return (
+              <div key={container.id} className="rounded-lg border border-slate-200 p-3 space-y-2">
+                <div className="flex items-start justify-between gap-2">
+                  <div>
+                    <div className="text-sm font-bold text-slate-800">{container.orderNumber}</div>
+                    <div className="text-xs text-slate-500">{container.shipName}</div>
+                  </div>
+                  <span className="text-[10px] px-2 py-0.5 rounded-full font-semibold bg-blue-50 text-blue-700 border border-blue-200">
+                    {statusLabel}
+                  </span>
+                </div>
+
+                <div className="text-xs text-slate-600">
+                  ETA: <span className="font-semibold">{new Date(container.eta).toLocaleDateString('en-ZA')}</span>
+                </div>
+
+                <div className="text-xs text-slate-600">
+                  Cargo: {totalPallets} pallets · {fmtKg(totalKg)}
+                  {container.source === 'builder' ? ' · from builder' : ' · manual entry'}
+                </div>
+
+                {(container.lines || []).length > 0 && (
+                  <div className="max-h-24 overflow-y-auto text-[11px] text-slate-500 space-y-1 border-t border-slate-100 pt-2">
+                    {container.lines.map((line, idx) => (
+                      <div key={`${container.id}_${line.itemId}_${idx}`} className="flex justify-between gap-2">
+                        <span className="truncate">{line.itemName}</span>
+                        <span className="font-semibold">{line.pallets} pl</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                <select
+                  value={container.status}
+                  onChange={e => void updateContainerStatus(container, e.target.value as TransitContainerStatus)}
+                  className="w-full px-2 py-1.5 border rounded-lg text-xs"
+                >
+                  <option value="on_po">On PO</option>
+                  <option value="on_the_way">On the Way</option>
+                  <option value="received">Received</option>
+                </select>
+              </div>
+            );
+          })}
+        </div>
+      </aside>
     </div>
   );
 };

@@ -38,6 +38,7 @@ const SettingsPage: React.FC<Props> = ({ settings, onUpdate }) => {
         settings: await db.getAll('settings'),
         stockCounts: await db.getAll('stockCounts'),
         alerts: await db.getAll('alerts'),
+        transit_containers: await db.getAll('transit_containers'),
       };
       const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
       const url = URL.createObjectURL(blob);
@@ -61,7 +62,7 @@ const SettingsPage: React.FC<Props> = ({ settings, onUpdate }) => {
       try {
         const data = JSON.parse(event.target?.result as string);
         if (confirm('Are you sure? This will OVERWRITE existing data with the backup.')) {
-          for (const key of ['items', 'lots', 'sales', 'settings', 'stockCounts', 'alerts']) {
+          for (const key of ['items', 'lots', 'sales', 'settings', 'stockCounts', 'alerts', 'transit_containers']) {
             const list = data[key] || [];
             for (const item of list) {
               await db.put(key, item);
@@ -86,7 +87,7 @@ const SettingsPage: React.FC<Props> = ({ settings, onUpdate }) => {
 
     setIsResetting(true);
     try {
-      for (const store of ['items', 'lots', 'sales', 'stockCounts', 'alerts', 'salesTransactions', 'settings']) {
+      for (const store of ['items', 'lots', 'sales', 'stockCounts', 'alerts', 'salesTransactions', 'settings', 'transit_containers']) {
         await db.clear(store);
       }
       showToast('success', 'Blank slate complete. Reloading...');

@@ -35,7 +35,8 @@ export function calculateItemPlanning(
   item: Item,
   allLots: InventoryLot[],
   allSales: SalesHistory[],
-  settings: Settings
+  settings: Settings,
+  inTransitStock = 0
 ): ItemPlanningView {
   const lots = allLots.filter(l => l.itemId === item.id);
   const sales = allSales.filter(s => s.itemId === item.id);
@@ -50,14 +51,15 @@ export function calculateItemPlanning(
   const leadTimeDays = toNumber(item.leadTimeDays, settings.defaultLeadTimeDays);
   const reorderPoint = dailyDemand * leadTimeDays + safetyStock;
   const reviewDemand = dailyDemand * toNumber(settings.reviewPeriodDays);
+  const effectiveStock = availableStock + Math.max(0, toNumber(inTransitStock));
 
-  let suggestedOrderQty = Math.max(0, reorderPoint + reviewDemand - availableStock);
+  let suggestedOrderQty = Math.max(0, reorderPoint + reviewDemand - effectiveStock);
   const itemMoq = Math.max(1, toNumber(item.moq, 1));
   if (suggestedOrderQty > 0) {
     suggestedOrderQty = Math.ceil(suggestedOrderQty / itemMoq) * itemMoq;
   }
 
-  const daysCover = dailyDemand > 0 ? availableStock / dailyDemand : Number.POSITIVE_INFINITY;
+  const daysCover = dailyDemand > 0 ? effectiveStock / dailyDemand : Number.POSITIVE_INFINITY;
 
   const expiringSoonLots = lots.filter(lot => {
     if (!lot.expiryDate || lot.status !== 'available') return false;
@@ -66,11 +68,11 @@ export function calculateItemPlanning(
   });
 
   const lowStockFlag = settings.lowStockRule === 'belowReorderPoint'
-    ? availableStock < reorderPoint
+    ? effectiveStock < reorderPoint
     : daysCover < settings.lowStockDaysCoverThreshold;
 
   const projectedDaysCoverAfterOrder = dailyDemand > 0
-    ? (availableStock + suggestedOrderQty) / dailyDemand
+    ? (effectiveStock + suggestedOrderQty) / dailyDemand
     : Number.POSITIVE_INFINITY;
 
   return {
@@ -78,6 +80,7 @@ export function calculateItemPlanning(
     lots,
     sales,
     availableStock,
+    inTransitStock: Math.max(0, toNumber(inTransitStock)),
     avgMonthlyDemand,
     dailyDemand,
     safetyStock,

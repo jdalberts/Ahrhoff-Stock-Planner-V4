@@ -73,6 +73,7 @@ export interface ItemPlanningView {
   lots: InventoryLot[];
   sales: SalesHistory[];
   availableStock: number;
+  inTransitStock: number;
   avgMonthlyDemand: number;
   dailyDemand: number;
   safetyStock: number;
@@ -84,6 +85,27 @@ export interface ItemPlanningView {
   daysCover: number;
   lowStockFlag: boolean;
   expiringSoonLots: InventoryLot[];
+}
+
+export interface TransitContainerLine {
+  itemId: string;
+  itemName: string;
+  pallets: number;
+  quantityKg: number;
+}
+
+export type TransitContainerStatus = 'on_po' | 'on_the_way' | 'received';
+
+export interface TransitContainer {
+  id: string;
+  orderNumber: string;
+  shipName: string;
+  eta: string;
+  status: TransitContainerStatus;
+  source: 'manual' | 'builder';
+  lines: TransitContainerLine[];
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface SalesTransaction {

@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { db } from './db';
-import { Item, InventoryLot, SalesHistory, Settings, ItemPlanningView, InventoryAlert } from './types';
+import { Item, InventoryLot, SalesHistory, Settings, ItemPlanningView, InventoryAlert, TransitContainer } from './types';
 import { DEFAULT_SETTINGS } from './constants';
 import { calculateItemPlanning, detectAlerts } from './calculations';
 import {
@@ -114,6 +114,7 @@ const AppContent: React.FC = () => {
   const [sales, setSales] = useState<SalesHistory[]>([]);
   const [settings, setSettings] = useState<Settings>(DEFAULT_SETTINGS);
   const [alerts, setAlerts] = useState<InventoryAlert[]>([]);
+  const [transitContainers, setTransitContainers] = useState<TransitContainer[]>([]);
   const [loading, setLoading] = useState(true);
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
   const [activeTab, setActiveTab] = useState<string>(() => {
@@ -137,11 +138,13 @@ const AppContent: React.FC = () => {
         const storedSales = await db.getAll<SalesHistory>('sales');
         const storedSettings = await db.getAll<Settings>('settings');
         const storedAlerts = await db.getAll<InventoryAlert>('alerts');
+        const storedTransit = await db.getAll<TransitContainer>('transit_containers');
 
         setItems(storedItems);
         setLots(storedLots);
         setSales(storedSales);
         setAlerts(storedAlerts);
+        setTransitContainers(storedTransit);
         if (storedSettings.length > 0) setSettings(storedSettings[0]);
       } catch (err) {
         console.error('DB Load Error', err);
@@ -152,9 +155,20 @@ const AppContent: React.FC = () => {
     fetchData();
   }, []);
 
+  const inTransitByItem = useMemo(() => {
+    const totals: Record<string, number> = {};
+    for (const container of transitContainers) {
+      if (container.status === 'received') continue;
+      for (const line of container.lines || []) {
+        totals[line.itemId] = (totals[line.itemId] || 0) + Number(line.quantityKg || 0);
+      }
+    }
+    return totals;
+  }, [transitContainers]);
+
   const planningViews: ItemPlanningView[] = useMemo(() => {
-    return items.map(item => calculateItemPlanning(item, lots, sales, settings));
-  }, [items, lots, sales, settings]);
+    return items.map(item => calculateItemPlanning(item, lots, sales, settings, inTransitByItem[item.id] || 0));
+  }, [items, lots, sales, settings, inTransitByItem]);
 
   useEffect(() => {
     if (loading) return;
@@ -190,6 +204,7 @@ const AppContent: React.FC = () => {
     setLots(await db.getAll<InventoryLot>('lots'));
     setSales(await db.getAll<SalesHistory>('sales'));
     setAlerts(await db.getAll<InventoryAlert>('alerts'));
+    setTransitContainers(await db.getAll<TransitContainer>('transit_containers'));
   };
 
   const updateSettings = async (newSettings: Settings) => {
