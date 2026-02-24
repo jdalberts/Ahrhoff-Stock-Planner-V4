@@ -1,5 +1,5 @@
 import React, { useState, useMemo, useEffect } from 'react';
-import { Package, AlertTriangle, Info, Truck } from 'lucide-react';
+import { Package, AlertTriangle, Info, Truck, Plus, Trash2, Pencil } from 'lucide-react';
 import { LEAD_TIME_WEEKS, KG_PER_PALLET, PALLETS_PER_CONTAINER } from './productCatalog';
 import { db } from './db';
 import { Item, InventoryLot, SalesHistory, TransitContainer, TransitContainerLine, TransitContainerStatus } from './types';
@@ -98,6 +98,13 @@ const ContainerPlanner: React.FC = () => {
   const [loading, setLoading] = useState(true);
   const [savingTransit, setSavingTransit] = useState(false);
   const [transitError, setTransitError] = useState<string | null>(null);
+  const [manualItemId, setManualItemId] = useState('');
+  const [manualQtyKg, setManualQtyKg] = useState('');
+  const [manualLines, setManualLines] = useState<TransitContainerLine[]>([]);
+  const [editingContainerId, setEditingContainerId] = useState<string | null>(null);
+  const [editingLines, setEditingLines] = useState<TransitContainerLine[]>([]);
+  const [editingItemId, setEditingItemId] = useState('');
+  const [editingQtyKg, setEditingQtyKg] = useState('');
   const [meta, setMeta] = useState<{ orderNumber: string; shipName: string; eta: string; status: TransitContainerStatus }>({
     orderNumber: '',
     shipName: '',
@@ -268,7 +275,12 @@ const ContainerPlanner: React.FC = () => {
   };
 
   const addManualContainer = async () => {
-    await saveTransitContainer('manual', []);
+    if (manualLines.length === 0) {
+      setTransitError('Add at least one stock line for a manual container.');
+      return;
+    }
+    await saveTransitContainer('manual', manualLines);
+    setManualLines([]);
   };
 
   const addBuilderContainer = async () => {
@@ -300,6 +312,140 @@ const ContainerPlanner: React.FC = () => {
     } catch (err) {
       console.error('Failed to update transit container status.', err);
       setTransitError('Failed to update container status.');
+    }
+  };
+
+  const addManualLine = () => {
+    if (!manualItemId) {
+      setTransitError('Select a stock item first.');
+      return;
+    }
+    const qty = Number(manualQtyKg);
+    if (!Number.isFinite(qty) || qty <= 0) {
+      setTransitError('Quantity must be greater than zero.');
+      return;
+    }
+
+    const item = items.find(i => i.id === manualItemId);
+    if (!item) {
+      setTransitError('Selected item was not found.');
+      return;
+    }
+
+    const pallets = Math.max(1, Math.ceil(qty / KG_PER_PALLET));
+
+    setManualLines(prev => {
+      const existingIdx = prev.findIndex(line => line.itemId === manualItemId);
+      if (existingIdx === -1) {
+        return [...prev, { itemId: item.id, itemName: item.name, quantityKg: qty, pallets }];
+      }
+      const next = [...prev];
+      const mergedQty = next[existingIdx].quantityKg + qty;
+      next[existingIdx] = {
+        ...next[existingIdx],
+        quantityKg: mergedQty,
+        pallets: Math.max(1, Math.ceil(mergedQty / KG_PER_PALLET)),
+      };
+      return next;
+    });
+
+    setTransitError(null);
+    setManualQtyKg('');
+  };
+
+  const removeManualLine = (itemId: string) => {
+    setManualLines(prev => prev.filter(line => line.itemId !== itemId));
+  };
+
+  const deleteContainer = async (containerId: string) => {
+    const ok = window.confirm('Delete this container from PO/In Transit?');
+    if (!ok) return;
+    try {
+      await db.delete('transit_containers', containerId);
+      await refreshTransitContainers();
+      setTransitError(null);
+    } catch (err) {
+      console.error('Failed to delete transit container.', err);
+      setTransitError('Failed to delete container.');
+    }
+  };
+
+  const startEditingContainer = (container: TransitContainer) => {
+    setEditingContainerId(container.id);
+    setEditingLines([...(container.lines || [])]);
+    setEditingItemId('');
+    setEditingQtyKg('');
+    setTransitError(null);
+  };
+
+  const cancelEditingContainer = () => {
+    setEditingContainerId(null);
+    setEditingLines([]);
+    setEditingItemId('');
+    setEditingQtyKg('');
+  };
+
+  const addEditingLine = () => {
+    if (!editingItemId) {
+      setTransitError('Select a stock item first.');
+      return;
+    }
+    const qty = Number(editingQtyKg);
+    if (!Number.isFinite(qty) || qty <= 0) {
+      setTransitError('Quantity must be greater than zero.');
+      return;
+    }
+    const item = items.find(i => i.id === editingItemId);
+    if (!item) {
+      setTransitError('Selected item was not found.');
+      return;
+    }
+
+    setEditingLines(prev => {
+      const index = prev.findIndex(line => line.itemId === editingItemId);
+      if (index === -1) {
+        return [...prev, {
+          itemId: item.id,
+          itemName: item.name,
+          quantityKg: qty,
+          pallets: Math.max(1, Math.ceil(qty / KG_PER_PALLET)),
+        }];
+      }
+      const next = [...prev];
+      const mergedQty = next[index].quantityKg + qty;
+      next[index] = {
+        ...next[index],
+        quantityKg: mergedQty,
+        pallets: Math.max(1, Math.ceil(mergedQty / KG_PER_PALLET)),
+      };
+      return next;
+    });
+
+    setEditingQtyKg('');
+    setTransitError(null);
+  };
+
+  const removeEditingLine = (itemId: string) => {
+    setEditingLines(prev => prev.filter(line => line.itemId !== itemId));
+  };
+
+  const saveEditedContainer = async (container: TransitContainer) => {
+    if (editingLines.length === 0) {
+      setTransitError('Container must have at least one stock line.');
+      return;
+    }
+    try {
+      await db.put('transit_containers', {
+        ...container,
+        lines: editingLines,
+        updatedAt: new Date().toISOString(),
+      });
+      await refreshTransitContainers();
+      cancelEditingContainer();
+      setTransitError(null);
+    } catch (err) {
+      console.error('Failed to save container lines.', err);
+      setTransitError('Failed to save container edits.');
     }
   };
 
@@ -521,6 +667,62 @@ const ContainerPlanner: React.FC = () => {
             </select>
           </div>
 
+          <div className="rounded-lg border border-slate-200 p-3 space-y-2">
+            <p className="text-[10px] font-bold uppercase tracking-wider text-slate-500">Manual Cargo Lines</p>
+            <div className="grid grid-cols-1 gap-2">
+              <select
+                value={manualItemId}
+                onChange={e => setManualItemId(e.target.value)}
+                className="w-full px-3 py-2 border rounded-lg text-sm"
+              >
+                <option value="">Select stock item</option>
+                {items.map(item => (
+                  <option key={item.id} value={item.id}>{item.name}</option>
+                ))}
+              </select>
+              <div className="flex gap-2">
+                <input
+                  type="number"
+                  min="0"
+                  step="1"
+                  value={manualQtyKg}
+                  onChange={e => setManualQtyKg(e.target.value)}
+                  className="w-full px-3 py-2 border rounded-lg text-sm"
+                  placeholder="Quantity (kg)"
+                />
+                <button
+                  type="button"
+                  onClick={addManualLine}
+                  className="px-3 py-2 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700"
+                  title="Add stock line"
+                >
+                  <Plus size={16} />
+                </button>
+              </div>
+            </div>
+
+            {manualLines.length > 0 && (
+              <div className="max-h-28 overflow-y-auto text-xs border-t border-slate-100 pt-2 space-y-1">
+                {manualLines.map(line => (
+                  <div key={line.itemId} className="flex items-center justify-between gap-2 bg-slate-50 rounded px-2 py-1">
+                    <span className="truncate text-slate-700">{line.itemName}</span>
+                    <div className="flex items-center gap-2">
+                      <span className="font-semibold text-slate-600">{fmtKg(line.quantityKg)}</span>
+                      <button
+                        type="button"
+                        onClick={() => removeManualLine(line.itemId)}
+                        className="text-red-600 hover:text-red-700"
+                        title="Remove line"
+                      >
+                        <Trash2 size={14} />
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
             <button
               onClick={() => void addManualContainer()}
@@ -591,6 +793,88 @@ const ContainerPlanner: React.FC = () => {
                   </div>
                 )}
 
+                {editingContainerId !== container.id && (
+                  <button
+                    type="button"
+                    onClick={() => startEditingContainer(container)}
+                    className="w-full px-2 py-1.5 border border-slate-200 bg-slate-50 text-slate-700 rounded-lg text-xs font-semibold hover:bg-slate-100 flex items-center justify-center gap-1"
+                  >
+                    <Pencil size={12} /> Edit Lines
+                  </button>
+                )}
+
+                {editingContainerId === container.id && (
+                  <div className="rounded-lg border border-slate-200 p-2 space-y-2">
+                    <p className="text-[10px] font-bold uppercase tracking-wider text-slate-500">Edit Cargo Lines</p>
+                    <div className="grid grid-cols-1 gap-2">
+                      <select
+                        value={editingItemId}
+                        onChange={e => setEditingItemId(e.target.value)}
+                        className="w-full px-2 py-1.5 border rounded-lg text-xs"
+                      >
+                        <option value="">Select stock item</option>
+                        {items.map(item => (
+                          <option key={item.id} value={item.id}>{item.name}</option>
+                        ))}
+                      </select>
+                      <div className="flex gap-2">
+                        <input
+                          type="number"
+                          min="0"
+                          step="1"
+                          value={editingQtyKg}
+                          onChange={e => setEditingQtyKg(e.target.value)}
+                          className="w-full px-2 py-1.5 border rounded-lg text-xs"
+                          placeholder="Quantity (kg)"
+                        />
+                        <button
+                          type="button"
+                          onClick={addEditingLine}
+                          className="px-2 py-1.5 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700"
+                        >
+                          <Plus size={12} />
+                        </button>
+                      </div>
+                    </div>
+
+                    <div className="max-h-24 overflow-y-auto text-[11px] space-y-1">
+                      {editingLines.map(line => (
+                        <div key={`edit_${container.id}_${line.itemId}`} className="flex items-center justify-between gap-2 bg-slate-50 rounded px-2 py-1">
+                          <span className="truncate text-slate-700">{line.itemName}</span>
+                          <div className="flex items-center gap-2">
+                            <span className="font-semibold text-slate-600">{fmtKg(line.quantityKg)}</span>
+                            <button
+                              type="button"
+                              onClick={() => removeEditingLine(line.itemId)}
+                              className="text-red-600 hover:text-red-700"
+                              title="Remove line"
+                            >
+                              <Trash2 size={12} />
+                            </button>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-2">
+                      <button
+                        type="button"
+                        onClick={() => void saveEditedContainer(container)}
+                        className="px-2 py-1.5 rounded-lg bg-green-600 text-white text-xs font-semibold hover:bg-green-700"
+                      >
+                        Save Changes
+                      </button>
+                      <button
+                        type="button"
+                        onClick={cancelEditingContainer}
+                        className="px-2 py-1.5 rounded-lg border border-slate-200 text-slate-600 text-xs font-semibold hover:bg-slate-50"
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  </div>
+                )}
+
                 <select
                   value={container.status}
                   onChange={e => void updateContainerStatus(container, e.target.value as TransitContainerStatus)}
@@ -600,6 +884,14 @@ const ContainerPlanner: React.FC = () => {
                   <option value="on_the_way">On the Way</option>
                   <option value="received">Received</option>
                 </select>
+
+                <button
+                  type="button"
+                  onClick={() => void deleteContainer(container.id)}
+                  className="w-full px-2 py-1.5 border border-red-200 bg-red-50 text-red-700 rounded-lg text-xs font-semibold hover:bg-red-100"
+                >
+                  Delete Container
+                </button>
               </div>
             );
           })}
