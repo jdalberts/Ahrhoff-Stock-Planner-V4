@@ -26,6 +26,17 @@ interface CustomerProfile {
   reorderStatus: 'overdue' | 'due_soon' | 'on_track';
 }
 
+interface CustomerInvoiceGroup {
+  key: string;
+  date: string;
+  docType: string;
+  docNumber: string;
+  orderId: string;
+  lines: CustomerTransaction[];
+  totalQty: number;
+  totalAmount: number;
+}
+
 function normalizeCustomerName(name: string): string {
   return name
     .normalize('NFKC')
@@ -199,6 +210,73 @@ const CustomerProfiles: React.FC = () => {
   const allCustomers = useMemo(() => buildCustomers(transactions), [transactions]);
   const [selected, setSelected] = useState<string | null>(null);
   const [search, setSearch] = useState('');
+  const [selectedInvoiceKey, setSelectedInvoiceKey] = useState('');
+  const [selectedInvoiceProductSearch, setSelectedInvoiceProductSearch] = useState('');
+
+  const selectedCustomer = useMemo(() => {
+    if (!selected) return null;
+    return allCustomers[selected] || null;
+  }, [selected, allCustomers]);
+
+  const selectedCustomerInvoices = useMemo(() => {
+    if (!selectedCustomer) return [] as CustomerInvoiceGroup[];
+
+    const grouped = new Map<string, CustomerInvoiceGroup>();
+    for (const tx of selectedCustomer.transactions) {
+      const key = tx.orderId || `${tx.docNumber}|${tx.date}|${tx.docType}`;
+      if (!grouped.has(key)) {
+        grouped.set(key, {
+          key,
+          date: tx.date,
+          docType: tx.docType || 'Invoice',
+          docNumber: tx.docNumber || '—',
+          orderId: tx.orderId,
+          lines: [],
+          totalQty: 0,
+          totalAmount: 0,
+        });
+      }
+
+      const invoice = grouped.get(key)!;
+      invoice.lines.push(tx);
+      invoice.totalQty += Number(tx.qty || 0);
+      invoice.totalAmount += Number(tx.amount || 0);
+    }
+
+    return [...grouped.values()]
+      .sort((a, b) => b.date.localeCompare(a.date))
+      .map(invoice => ({
+        ...invoice,
+        lines: [...invoice.lines].sort((a, b) => a.product.localeCompare(b.product)),
+      }));
+  }, [selectedCustomer]);
+
+  const selectedInvoice = useMemo(() => {
+    if (!selectedInvoiceKey) return null;
+    return selectedCustomerInvoices.find(invoice => invoice.key === selectedInvoiceKey) || null;
+  }, [selectedCustomerInvoices, selectedInvoiceKey]);
+
+  const selectedInvoiceFilteredLines = useMemo(() => {
+    if (!selectedInvoice) return [] as CustomerTransaction[];
+    const needle = selectedInvoiceProductSearch.toLowerCase().trim();
+    if (!needle) return selectedInvoice.lines;
+    return selectedInvoice.lines.filter(line => line.product.toLowerCase().includes(needle));
+  }, [selectedInvoice, selectedInvoiceProductSearch]);
+
+  useEffect(() => {
+    if (!selectedCustomer || selectedCustomerInvoices.length === 0) {
+      if (selectedInvoiceKey) setSelectedInvoiceKey('');
+      return;
+    }
+
+    if (!selectedCustomerInvoices.some(invoice => invoice.key === selectedInvoiceKey)) {
+      setSelectedInvoiceKey(selectedCustomerInvoices[0].key);
+    }
+  }, [selectedCustomer, selectedCustomerInvoices, selectedInvoiceKey]);
+
+  useEffect(() => {
+    setSelectedInvoiceProductSearch('');
+  }, [selectedInvoiceKey, selected]);
 
   const clearImportedCustomerData = async () => {
     if (legacyCount === 0) {
@@ -237,8 +315,8 @@ const CustomerProfiles: React.FC = () => {
     .filter(c => c.name.toLowerCase().includes(search.toLowerCase()))
     .sort((a, b) => b.totalQty - a.totalQty);
 
-  if (selected && allCustomers[selected]) {
-    const c = allCustomers[selected];
+  if (selectedCustomer) {
+    const c = selectedCustomer;
     const prodEntries = Object.entries(c.products).sort((a, b) => b[1].qty - a[1].qty);
 
     return (
@@ -298,6 +376,79 @@ const CustomerProfiles: React.FC = () => {
               </tbody>
             </table>
           </div>
+        </div>
+
+        <div className="bg-white rounded-2xl p-6 border border-slate-200 shadow-sm space-y-4">
+          <h3 className="text-lg font-bold text-slate-800">Invoice Detail Viewer</h3>
+
+          {selectedCustomerInvoices.length === 0 ? (
+            <p className="text-sm text-slate-400">No invoice-level data available for this customer.</p>
+          ) : (
+            <>
+              <div className="flex flex-col md:flex-row gap-3 md:items-center">
+                <select
+                  value={selectedInvoiceKey}
+                  onChange={(e) => setSelectedInvoiceKey(e.target.value)}
+                  className="px-3 py-2 border rounded-lg text-sm md:min-w-[420px]"
+                >
+                  {selectedCustomerInvoices.map(invoice => (
+                    <option key={invoice.key} value={invoice.key}>
+                      {invoice.docNumber} • {invoice.docType} • {fmtDate(invoice.date)} • {invoice.lines.length} lines
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              {selectedInvoice && (
+                <>
+                  <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
+                    <div className="p-3 rounded-lg border bg-slate-50"><span className="text-slate-500">Invoice</span><div className="font-semibold">{selectedInvoice.docNumber}</div></div>
+                    <div className="p-3 rounded-lg border bg-slate-50"><span className="text-slate-500">Doc Type</span><div className="font-semibold">{selectedInvoice.docType}</div></div>
+                    <div className="p-3 rounded-lg border bg-slate-50"><span className="text-slate-500">Total Qty</span><div className="font-semibold">{selectedInvoice.totalQty.toLocaleString('en-ZA')}</div></div>
+                    <div className="p-3 rounded-lg border bg-slate-50"><span className="text-slate-500">Total Amount</span><div className="font-semibold">{fmtR(selectedInvoice.totalAmount)}</div></div>
+                  </div>
+
+                  <div className="relative">
+                    <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+                    <input
+                      type="text"
+                      placeholder="Search product in this invoice..."
+                      value={selectedInvoiceProductSearch}
+                      onChange={(e) => setSelectedInvoiceProductSearch(e.target.value)}
+                      className="pl-9 pr-4 py-2 rounded-lg border border-slate-200 text-sm w-full md:w-80 focus:outline-none focus:ring-2 focus:ring-green-500/30 focus:border-green-500"
+                    />
+                  </div>
+
+                  <div className="overflow-x-auto border rounded-lg">
+                    <table className="w-full text-sm">
+                      <thead className="bg-slate-50">
+                        <tr>
+                          {['Product', 'Qty', 'Price/kg', 'Amount'].map(h => (
+                            <th key={h} className="text-left px-3 py-2 text-xs uppercase text-slate-500">{h}</th>
+                          ))}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {selectedInvoiceFilteredLines.map(line => (
+                          <tr key={line.id} className="border-t">
+                            <td className="px-3 py-2 font-medium text-slate-700">{line.product}</td>
+                            <td className={`px-3 py-2 ${line.qty < 0 ? 'text-red-600 font-semibold' : 'text-slate-600'}`}>{line.qty.toLocaleString('en-ZA')}</td>
+                            <td className="px-3 py-2 text-slate-500">{fmtR(line.pricePerKg)}</td>
+                            <td className={`px-3 py-2 font-semibold ${line.amount < 0 ? 'text-red-600' : 'text-green-700'}`}>{fmtR(line.amount)}</td>
+                          </tr>
+                        ))}
+                        {selectedInvoiceFilteredLines.length === 0 && (
+                          <tr className="border-t">
+                            <td colSpan={4} className="px-3 py-4 text-center text-slate-400">No products match this search.</td>
+                          </tr>
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+                </>
+              )}
+            </>
+          )}
         </div>
 
         <div className="bg-white rounded-2xl p-6 border border-slate-200 shadow-sm">

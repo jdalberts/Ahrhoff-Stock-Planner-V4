@@ -579,21 +579,19 @@ const ImportWizard: React.FC<Props> = ({ onImported }) => {
           await db.put('lots', { ...lot, quantityRemaining: 0 });
         }
 
-        if (row.qtyOnHand > 0) {
-          const newLot: InventoryLot = {
-            id: uid(),
-            itemId: item.id,
-            lotNumber: `STOCKTAKE-${today}-${uid().slice(-4).toUpperCase()}`,
-            expiryDate: null,
-            quantityRemaining: row.qtyOnHand,
-            receivedDate: today,
-            quantityReceived: row.qtyOnHand,
-            status: 'available',
-            notes: `Imported from stocktake worksheet: ${workbook.fileName}`,
-          };
-          await db.put('lots', newLot);
-          lotsCreated += 1;
-        }
+        const newLot: InventoryLot = {
+          id: uid(),
+          itemId: item.id,
+          lotNumber: `STOCKTAKE-${today}-${uid().slice(-4).toUpperCase()}`,
+          expiryDate: null,
+          quantityRemaining: row.qtyOnHand,
+          receivedDate: today,
+          quantityReceived: row.qtyOnHand,
+          status: 'available',
+          notes: `Imported from stocktake worksheet: ${workbook.fileName}`,
+        };
+        await db.put('lots', newLot);
+        lotsCreated += 1;
       }
 
       const batch: ImportBatchV5 = {

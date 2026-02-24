@@ -61,8 +61,7 @@ const StockTake: React.FC<Props> = ({ lots, items, onRefresh }) => {
       const name = getItemName(l.itemId).toLowerCase();
       const num = l.lotNumber.toLowerCase();
       return name.includes(searchTerm.toLowerCase()) || num.includes(searchTerm.toLowerCase());
-    })
-    .slice(0, 10);
+    });
 
   const handleSave = async () => {
     setStatusMessage(null);
@@ -232,21 +231,19 @@ const StockTake: React.FC<Props> = ({ lots, items, onRefresh }) => {
           await db.put('lots', updated);
         }
 
-        if (row.qtyOnHand > 0) {
-          const newLot: InventoryLot = {
-            id: uid(),
-            itemId: item.id,
-            lotNumber: `STOCKTAKE-${today}-${uid().slice(-4).toUpperCase()}`,
-            expiryDate: null,
-            quantityRemaining: row.qtyOnHand,
-            receivedDate: today,
-            quantityReceived: row.qtyOnHand,
-            status: 'available',
-            notes: `Imported from stock worksheet: ${stockFileName || 'manual upload'}`,
-          };
-          await db.put('lots', newLot);
-          lotsCreated += 1;
-        }
+        const newLot: InventoryLot = {
+          id: uid(),
+          itemId: item.id,
+          lotNumber: `STOCKTAKE-${today}-${uid().slice(-4).toUpperCase()}`,
+          expiryDate: null,
+          quantityRemaining: row.qtyOnHand,
+          receivedDate: today,
+          quantityReceived: row.qtyOnHand,
+          status: 'available',
+          notes: `Imported from stock worksheet: ${stockFileName || 'manual upload'}`,
+        };
+        await db.put('lots', newLot);
+        lotsCreated += 1;
       }
 
       await onRefresh();
