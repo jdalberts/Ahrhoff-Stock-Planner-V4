@@ -217,34 +217,43 @@ const Items: React.FC<Props> = ({ items, onRefresh }) => {
         </div>
       )}
 
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-        {filteredItems.map(item => (
-          <div key={item.id} className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm hover:shadow-md transition-shadow group">
-            <div className="flex justify-between items-start mb-4">
-              <span className="px-2 py-1 bg-slate-100 text-slate-500 text-[10px] font-bold rounded uppercase tracking-widest">{item.category}</span>
-              <div className="flex space-x-2 opacity-0 group-hover:opacity-100 transition-opacity">
-                <button onClick={() => {setNewItem(item); setIsAdding(true);}} className="p-1.5 text-slate-400 hover:text-blue-600"><Edit2 size={16}/></button>
-                <button onClick={() => deleteItem(item.id)} className="p-1.5 text-slate-400 hover:text-red-600"><Trash2 size={16}/></button>
-              </div>
-            </div>
-            <h3 className="text-xl font-bold text-slate-800 mb-1">{item.name}</h3>
-            <p className="text-sm font-mono text-slate-400 mb-4">{item.skuCode}</p>
-            <div className="grid grid-cols-3 gap-4 text-sm border-t border-slate-50 pt-4">
-              <div>
-                <p className="text-slate-400">Pack Size</p>
-                <p className="font-bold text-slate-700">{item.packSize}kg</p>
-              </div>
-              <div>
-                <p className="text-slate-400">Lead Time</p>
-                <p className="font-bold text-slate-700">{item.leadTimeDays} days</p>
-              </div>
-              <div>
-                <p className="text-slate-400">Shelf Life</p>
-                <p className="font-bold text-slate-700">{item.shelfLifeDays ?? 365} days</p>
-              </div>
-            </div>
-          </div>
-        ))}
+      <div className="bg-white rounded-2xl border border-slate-200 overflow-hidden">
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead className="bg-slate-50">
+              <tr>
+                {['Name', 'SKU', 'Category', 'Pack Size', 'Lead Time', 'Shelf Life', 'Actions'].map(header => (
+                  <th key={header} className="text-left px-4 py-3 text-xs uppercase text-slate-500 font-semibold">{header}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-100">
+              {filteredItems.map(item => (
+                <tr key={item.id} className="hover:bg-slate-50/60">
+                  <td className="px-4 py-3 font-semibold text-slate-800">{item.name}</td>
+                  <td className="px-4 py-3 font-mono text-slate-500">{item.skuCode}</td>
+                  <td className="px-4 py-3">
+                    <span className="px-2 py-0.5 bg-slate-100 text-slate-600 text-[10px] font-bold rounded uppercase tracking-widest">{item.category}</span>
+                  </td>
+                  <td className="px-4 py-3 text-slate-600">{item.packSize} kg</td>
+                  <td className="px-4 py-3 text-slate-600">{item.leadTimeDays} days</td>
+                  <td className="px-4 py-3 text-slate-600">{item.shelfLifeDays ?? 365} days</td>
+                  <td className="px-4 py-3">
+                    <div className="flex items-center gap-2">
+                      <button onClick={() => { setNewItem(item); setIsAdding(true); }} className="p-1.5 text-slate-400 hover:text-blue-600"><Edit2 size={16} /></button>
+                      <button onClick={() => deleteItem(item.id)} className="p-1.5 text-slate-400 hover:text-red-600"><Trash2 size={16} /></button>
+                    </div>
+                  </td>
+                </tr>
+              ))}
+              {filteredItems.length === 0 && (
+                <tr>
+                  <td colSpan={7} className="px-4 py-12 text-center text-slate-400">No products found.</td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
       </div>
     </div>
   );
