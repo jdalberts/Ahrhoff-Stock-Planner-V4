@@ -27,6 +27,43 @@ function toIsoDate(value: any): string {
   }
 
   const text = String(value).trim();
+
+  const isoMatch = text.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
+  if (isoMatch) {
+    const year = Number(isoMatch[1]);
+    const month = Number(isoMatch[2]);
+    const day = Number(isoMatch[3]);
+    if (year >= 1900 && month >= 1 && month <= 12 && day >= 1 && day <= 31) {
+      return `${year.toString().padStart(4, '0')}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+    }
+  }
+
+  const slashOrDashMatch = text.match(/^(\d{1,2})[\/-](\d{1,2})[\/-](\d{2,4})$/);
+  if (slashOrDashMatch) {
+    const partA = Number(slashOrDashMatch[1]);
+    const partB = Number(slashOrDashMatch[2]);
+    const yearRaw = Number(slashOrDashMatch[3]);
+    const year = yearRaw < 100 ? 2000 + yearRaw : yearRaw;
+
+    let day = partA;
+    let month = partB;
+
+    if (partA <= 12 && partB > 12) {
+      month = partA;
+      day = partB;
+    } else if (partA > 12 && partB <= 12) {
+      day = partA;
+      month = partB;
+    } else {
+      day = partA;
+      month = partB;
+    }
+
+    if (year >= 1900 && month >= 1 && month <= 12 && day >= 1 && day <= 31) {
+      return `${year.toString().padStart(4, '0')}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+    }
+  }
+
   const dt = new Date(text);
   if (!Number.isNaN(dt.getTime())) {
     return dt.toISOString().split('T')[0];

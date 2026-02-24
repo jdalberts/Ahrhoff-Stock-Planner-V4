@@ -99,6 +99,10 @@ const SalesOrdersView: React.FC = () => {
     });
   };
 
+  const clearSelectedOrders = () => {
+    setSelectedOrderIds(new Set());
+  };
+
   const buildOrdersFromFallbackTransactions = (transactions: SalesTransaction[]): FallbackOrderGroup[] => {
     const groups = new Map<string, SalesTransaction[]>();
 
@@ -435,7 +439,7 @@ const SalesOrdersView: React.FC = () => {
           <span>Orders ({filteredOrders.length})</span>
           <div className="text-xs text-slate-500 flex gap-2">
             <button className="px-2 py-1 border rounded" onClick={() => setAllFilteredSelection(filteredOrders, true)}>Select all shown</button>
-            <button className="px-2 py-1 border rounded" onClick={() => setAllFilteredSelection(filteredOrders, false)}>Clear selected</button>
+            <button className="px-2 py-1 border rounded" onClick={clearSelectedOrders}>Clear selected</button>
           </div>
         </div>
 

@@ -1,11 +1,19 @@
 import React, { useState, useMemo, useEffect } from 'react';
 import { ArrowLeft, Search, Users } from 'lucide-react';
-import { SalesTransaction } from './types';
+import { OrderLineV5, OrderV5, SalesTransaction } from './types';
 import { db } from './db';
+import { isCreditDocument } from './productNormalization';
+
+interface CustomerTransaction extends SalesTransaction {
+  amount: number;
+  docType: string;
+  docNumber: string;
+  orderId: string;
+}
 
 interface CustomerProfile {
   name: string;
-  transactions: SalesTransaction[];
+  transactions: CustomerTransaction[];
   products: Record<string, { qty: number; count: number; lastDate: string }>;
   totalQty: number;
   totalRevenue: number;
@@ -37,14 +45,17 @@ function fmtR(v: number): string {
   return 'R' + v.toLocaleString('en-ZA', { maximumFractionDigits: 0 });
 }
 function fmtDate(d: string): string {
-  return new Date(d).toLocaleDateString('en-ZA', { day: 'numeric', month: 'short', year: '2-digit' });
+  if (!d) return '—';
+  const parsed = new Date(d);
+  if (Number.isNaN(parsed.getTime())) return d;
+  return parsed.toLocaleDateString('en-ZA', { day: 'numeric', month: 'short', year: '2-digit' });
 }
 function daysAgo(d: string): number {
   return Math.floor((Date.now() - new Date(d).getTime()) / 86400000);
 }
 function getMonth(d: string): string { return d.substring(0, 7); }
 
-function buildCustomers(sourceTransactions: SalesTransaction[]): Record<string, CustomerProfile> {
+function buildCustomers(sourceTransactions: CustomerTransaction[]): Record<string, CustomerProfile> {
   const customers: Record<string, CustomerProfile> = {};
 
   for (const s of sourceTransactions) {
@@ -60,7 +71,7 @@ function buildCustomers(sourceTransactions: SalesTransaction[]): Record<string, 
     const c = customers[customerName];
     c.transactions.push(s);
     c.totalQty += s.qty;
-    c.totalRevenue += s.qty * s.pricePerKg;
+    c.totalRevenue += s.amount;
     if (!c.products[s.product]) c.products[s.product] = { qty: 0, count: 0, lastDate: '' };
     c.products[s.product].qty += s.qty;
     c.products[s.product].count += 1;
@@ -82,6 +93,55 @@ function buildCustomers(sourceTransactions: SalesTransaction[]): Record<string, 
   return customers;
 }
 
+function toCustomerTransactionsFromOrders(orders: OrderV5[], lines: OrderLineV5[]): CustomerTransaction[] {
+  const orderMap = new Map<string, OrderV5>();
+  for (const order of orders) orderMap.set(order.id, order);
+
+  return lines
+    .map((line): CustomerTransaction | null => {
+      const order = orderMap.get(line.orderId);
+      if (!order) return null;
+
+      const credit = isCreditDocument(order.docType || '');
+      const rawQty = Number(line.qty || 0);
+      const rawAmount = Number(line.amount || 0);
+      const rawUnitPrice = Number(line.unitPrice || 0);
+
+      const signedQty = credit ? -Math.abs(rawQty) : rawQty;
+      const signedAmount = credit ? -Math.abs(rawAmount) : rawAmount;
+      const signedUnitPrice = credit ? -Math.abs(rawUnitPrice) : rawUnitPrice;
+
+      return {
+        id: line.id,
+        customer: order.customerNameRaw || 'Unknown Customer',
+        product: line.productNameNormalized || line.productNameRaw || 'Unknown Product',
+        date: order.docDate || '',
+        qty: signedQty,
+        pricePerKg: signedUnitPrice,
+        amount: signedAmount,
+        docType: order.docType || '',
+        docNumber: order.docNumber || '',
+        orderId: order.id,
+      };
+    })
+    .filter((row): row is CustomerTransaction => row !== null);
+}
+
+function toCustomerTransactionsFromLegacy(source: SalesTransaction[]): CustomerTransaction[] {
+  return source.map((row, index) => ({
+    id: row.id || `legacy-${index}`,
+    customer: row.customer,
+    product: row.product,
+    date: row.date,
+    qty: Number(row.qty || 0),
+    pricePerKg: Number(row.pricePerKg || 0),
+    amount: Number(row.qty || 0) * Number(row.pricePerKg || 0),
+    docType: 'Invoice',
+    docNumber: '',
+    orderId: row.id || `legacy-${index}`,
+  }));
+}
+
 const StatusBadge: React.FC<{ status: string }> = ({ status }) => {
   const map: Record<string, { cls: string; label: string }> = {
     overdue: { cls: 'bg-red-100 text-red-700', label: '🔴 Overdue' },
@@ -93,27 +153,42 @@ const StatusBadge: React.FC<{ status: string }> = ({ status }) => {
 };
 
 const CustomerProfiles: React.FC = () => {
-  const [transactions, setTransactions] = useState<SalesTransaction[]>([]);
-  const [dataSource, setDataSource] = useState<'empty' | 'imported'>('empty');
+  const [transactions, setTransactions] = useState<CustomerTransaction[]>([]);
+  const [dataSource, setDataSource] = useState<'empty' | 'sales_orders' | 'legacy'>('empty');
   const [isClearing, setIsClearing] = useState(false);
-  const [importedCount, setImportedCount] = useState(0);
+  const [legacyCount, setLegacyCount] = useState(0);
+  const [ordersCount, setOrdersCount] = useState(0);
+  const [orderLinesCount, setOrderLinesCount] = useState(0);
 
   useEffect(() => {
     const loadTransactions = async () => {
       try {
-        const imported = await db.getAll<SalesTransaction>('salesTransactions');
-        setImportedCount(imported.length);
-        if (imported.length > 0) {
-          setTransactions(imported);
-          setDataSource('imported');
+        const [orders, orderLines, legacy] = await Promise.all([
+          db.getAll<OrderV5>('orders'),
+          db.getAll<OrderLineV5>('order_lines'),
+          db.getAll<SalesTransaction>('salesTransactions'),
+        ]);
+
+        setOrdersCount(orders.length);
+        setOrderLinesCount(orderLines.length);
+        setLegacyCount(legacy.length);
+
+        if (orders.length > 0 && orderLines.length > 0) {
+          setTransactions(toCustomerTransactionsFromOrders(orders, orderLines));
+          setDataSource('sales_orders');
+        } else if (legacy.length > 0) {
+          setTransactions(toCustomerTransactionsFromLegacy(legacy));
+          setDataSource('legacy');
         } else {
           setTransactions([]);
           setDataSource('empty');
         }
       } catch (err) {
-        console.error('Failed to load imported sales transactions, falling back to seed data.', err);
+        console.error('Failed to load customer profile sources.', err);
         setTransactions([]);
-        setImportedCount(0);
+        setLegacyCount(0);
+        setOrdersCount(0);
+        setOrderLinesCount(0);
         setDataSource('empty');
       }
     };
@@ -126,24 +201,33 @@ const CustomerProfiles: React.FC = () => {
   const [search, setSearch] = useState('');
 
   const clearImportedCustomerData = async () => {
-    if (importedCount === 0) {
-      window.alert('No imported customer data to clear.');
+    if (legacyCount === 0) {
+      window.alert('No legacy imported customer data to clear.');
       return;
     }
-    const ok = window.confirm('Clear all imported customer transactions and switch back to fallback data?');
+    const ok = window.confirm('Clear all legacy customer transactions from salesTransactions?');
     if (!ok) return;
 
     setIsClearing(true);
     try {
       await db.clear('salesTransactions');
-      setTransactions([]);
-      setImportedCount(0);
-      setDataSource('empty');
+      setLegacyCount(0);
+      if (ordersCount > 0 && orderLinesCount > 0) {
+        const [orders, orderLines] = await Promise.all([
+          db.getAll<OrderV5>('orders'),
+          db.getAll<OrderLineV5>('order_lines'),
+        ]);
+        setTransactions(toCustomerTransactionsFromOrders(orders, orderLines));
+        setDataSource('sales_orders');
+      } else {
+        setTransactions([]);
+        setDataSource('empty');
+      }
       setSelected(null);
-      window.alert('Imported customer data cleared.');
+      window.alert('Legacy customer data cleared.');
     } catch (err) {
-      console.error('Failed to clear imported customer transactions.', err);
-      window.alert('Failed to clear imported customer data. Please try again.');
+      console.error('Failed to clear legacy customer transactions.', err);
+      window.alert('Failed to clear legacy customer data. Please try again.');
     } finally {
       setIsClearing(false);
     }
@@ -237,7 +321,7 @@ const CustomerProfiles: React.FC = () => {
                     </td>
                     <td className="px-4 py-3 text-slate-500">{fmtR(t.pricePerKg)}</td>
                     <td className={`px-4 py-3 font-semibold ${t.qty < 0 ? 'text-red-600' : 'text-green-700'}`}>
-                      {fmtR(t.qty * t.pricePerKg)}
+                      {fmtR(t.amount)}
                     </td>
                   </tr>
                 ))}
@@ -256,23 +340,27 @@ const CustomerProfiles: React.FC = () => {
           <div className="flex items-center gap-2 mb-2">
             <h2 className="text-3xl font-bold text-slate-800">Customer Profiles</h2>
             <span className={`px-2 py-1 rounded-full text-[10px] font-bold uppercase tracking-wider border ${
-              dataSource === 'imported'
+              dataSource === 'sales_orders'
                 ? 'bg-green-50 text-green-700 border-green-200'
+                : dataSource === 'legacy'
+                  ? 'bg-blue-50 text-blue-700 border-blue-200'
                 : 'bg-amber-50 text-amber-700 border-amber-200'
             }`}>
-              {dataSource === 'imported' ? 'Data Source: Imported' : 'Data Source: Empty'}
+              {dataSource === 'sales_orders' ? `Data Source: Sales/Orders (${ordersCount} orders · ${orderLinesCount} lines)` : dataSource === 'legacy' ? `Data Source: Legacy Import (${legacyCount})` : 'Data Source: Empty'}
             </span>
           </div>
           <p className="text-slate-500">{customerList.length} customers · Sorted by total volume</p>
         </div>
         <div className="flex items-center gap-2">
-          <button
-            onClick={clearImportedCustomerData}
-            disabled={isClearing}
-            className="px-3 py-2 text-amber-700 bg-amber-50 border border-amber-200 rounded-lg font-medium text-xs hover:bg-amber-100 disabled:opacity-50 disabled:cursor-not-allowed"
-          >
-            {isClearing ? 'Clearing...' : `Clear Imported (${importedCount})`}
-          </button>
+          {dataSource === 'legacy' && (
+            <button
+              onClick={clearImportedCustomerData}
+              disabled={isClearing}
+              className="px-3 py-2 text-amber-700 bg-amber-50 border border-amber-200 rounded-lg font-medium text-xs hover:bg-amber-100 disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              {isClearing ? 'Clearing...' : `Clear Legacy (${legacyCount})`}
+            </button>
+          )}
           <div className="relative">
           <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
           <input
