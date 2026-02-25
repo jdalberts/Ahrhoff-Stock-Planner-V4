@@ -96,6 +96,13 @@ export interface TransitContainerLine {
 
 export type TransitContainerStatus = 'on_po' | 'on_the_way' | 'received';
 
+export interface ShippingPosition {
+  lat: number;
+  lon: number;
+}
+
+export type ShippingStatus = 'At sea' | 'In port' | 'Arrived' | 'Unknown';
+
 export interface TransitContainer {
   id: string;
   orderNumber: string;
@@ -104,6 +111,14 @@ export interface TransitContainer {
   status: TransitContainerStatus;
   source: 'manual' | 'builder';
   lines: TransitContainerLine[];
+  containerNumber?: string;
+  vesselIMO?: string;
+  vesselName?: string;
+  destinationPort?: string;
+  etaIso?: string;
+  lastPosition?: ShippingPosition;
+  lastUpdatedIso?: string;
+  shippingStatus?: ShippingStatus;
   createdAt: string;
   updatedAt: string;
 }

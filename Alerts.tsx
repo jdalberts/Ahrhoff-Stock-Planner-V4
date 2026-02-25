@@ -1,8 +1,9 @@
 import React, { useState, useMemo, useEffect } from 'react';
-import { Package, AlertTriangle, Info, Truck, Plus, Trash2, Pencil } from 'lucide-react';
+import { Package, AlertTriangle, Info, Truck, Plus, Trash2, Pencil, RefreshCw, ExternalLink, ChevronDown, ChevronUp } from 'lucide-react';
 import { LEAD_TIME_WEEKS, KG_PER_PALLET, PALLETS_PER_CONTAINER } from './productCatalog';
 import { db } from './db';
 import { Item, InventoryLot, SalesHistory, TransitContainer, TransitContainerLine, TransitContainerStatus } from './types';
+import { fetchShippingForContainer, getMarineTrafficMapUrl, ShippingTrackerData } from './src/services/shippingService';
 
 // ── Types ──
 interface PlanRow {
@@ -31,6 +32,13 @@ interface PlanRow {
 function fmtKg(v: number): string {
   if (Math.abs(v) >= 1000) return (v / 1000).toFixed(1) + 't';
   return Math.round(v) + ' kg';
+}
+
+function fmtIsoDateTime(v?: string): string {
+  if (!v) return '—';
+  const parsed = new Date(v);
+  if (Number.isNaN(parsed.getTime())) return v;
+  return parsed.toLocaleString('en-ZA');
 }
 function getProductBase(
   items: Item[],
@@ -109,6 +117,16 @@ const ContainerPlanner: React.FC<Props> = ({ onDataChanged }) => {
   const [editingLines, setEditingLines] = useState<TransitContainerLine[]>([]);
   const [editingItemId, setEditingItemId] = useState('');
   const [editingQtyKg, setEditingQtyKg] = useState('');
+  const [shippingOpenByContainerId, setShippingOpenByContainerId] = useState<Record<string, boolean>>({});
+  const [shippingDataByContainerId, setShippingDataByContainerId] = useState<Record<string, ShippingTrackerData>>({});
+  const [shippingLoadingByContainerId, setShippingLoadingByContainerId] = useState<Record<string, boolean>>({});
+  const [shippingErrorByContainerId, setShippingErrorByContainerId] = useState<Record<string, string | null>>({});
+  const [shippingDraftByContainerId, setShippingDraftByContainerId] = useState<Record<string, {
+    containerNumber: string;
+    vesselIMO: string;
+    destinationPort: string;
+  }>>({});
+  const [savingShippingContainerId, setSavingShippingContainerId] = useState<string | null>(null);
   const [meta, setMeta] = useState<{ orderNumber: string; shipName: string; eta: string; status: TransitContainerStatus }>({
     orderNumber: '',
     shipName: '',
@@ -246,6 +264,83 @@ const ContainerPlanner: React.FC<Props> = ({ onDataChanged }) => {
   const syncAppData = async () => {
     if (onDataChanged) {
       await onDataChanged();
+    }
+  };
+
+  const ensureShippingDraft = (container: TransitContainer) => {
+    setShippingDraftByContainerId(prev => {
+      if (prev[container.id]) return prev;
+      return {
+        ...prev,
+        [container.id]: {
+          containerNumber: container.containerNumber || '',
+          vesselIMO: container.vesselIMO || '',
+          destinationPort: container.destinationPort || '',
+        },
+      };
+    });
+  };
+
+  const loadShippingData = async (container: TransitContainer, forceRefresh = false) => {
+    if (!container.vesselIMO && !container.containerNumber) return;
+
+    setShippingLoadingByContainerId(prev => ({ ...prev, [container.id]: true }));
+    setShippingErrorByContainerId(prev => ({ ...prev, [container.id]: null }));
+
+    try {
+      const data = await fetchShippingForContainer(container, { forceRefresh });
+      if (data) {
+        setShippingDataByContainerId(prev => ({ ...prev, [container.id]: data }));
+      }
+    } catch (err: any) {
+      setShippingErrorByContainerId(prev => ({
+        ...prev,
+        [container.id]: err?.message || 'Unable to fetch shipping data',
+      }));
+    } finally {
+      setShippingLoadingByContainerId(prev => ({ ...prev, [container.id]: false }));
+    }
+  };
+
+  const saveShippingIdentifiers = async (container: TransitContainer) => {
+    const draft = shippingDraftByContainerId[container.id] || {
+      containerNumber: container.containerNumber || '',
+      vesselIMO: container.vesselIMO || '',
+      destinationPort: container.destinationPort || '',
+    };
+
+    const updatedContainer: TransitContainer = {
+      ...container,
+      containerNumber: draft.containerNumber.trim() || undefined,
+      vesselIMO: draft.vesselIMO.trim() || undefined,
+      destinationPort: draft.destinationPort.trim() || undefined,
+      updatedAt: new Date().toISOString(),
+    };
+
+    setSavingShippingContainerId(container.id);
+    try {
+      await db.put('transit_containers', updatedContainer);
+      await refreshTransitContainers();
+      await syncAppData();
+      setShippingErrorByContainerId(prev => ({ ...prev, [container.id]: null }));
+      await loadShippingData(updatedContainer, true);
+    } catch (err) {
+      console.error('Failed to save shipping identifiers.', err);
+      setShippingErrorByContainerId(prev => ({
+        ...prev,
+        [container.id]: 'Unable to save shipping identifiers',
+      }));
+    } finally {
+      setSavingShippingContainerId(null);
+    }
+  };
+
+  const toggleShippingTracker = (container: TransitContainer) => {
+    const isOpen = Boolean(shippingOpenByContainerId[container.id]);
+    ensureShippingDraft(container);
+    setShippingOpenByContainerId(prev => ({ ...prev, [container.id]: !isOpen }));
+    if (!isOpen && (container.vesselIMO || container.containerNumber)) {
+      void loadShippingData(container, false);
     }
   };
 
@@ -441,6 +536,11 @@ const ContainerPlanner: React.FC<Props> = ({ onDataChanged }) => {
     setEditingItemId('');
     setEditingQtyKg('');
     setTransitError(null);
+    ensureShippingDraft(container);
+    setShippingOpenByContainerId(prev => ({ ...prev, [container.id]: true }));
+    if (container.vesselIMO || container.containerNumber) {
+      void loadShippingData(container, false);
+    }
   };
 
   const cancelEditingContainer = () => {
@@ -827,6 +927,26 @@ const ContainerPlanner: React.FC<Props> = ({ onDataChanged }) => {
             const totalKg = (container.lines || []).reduce((sum, line) => sum + Number(line.quantityKg || 0), 0);
             const totalPallets = (container.lines || []).reduce((sum, line) => sum + Number(line.pallets || 0), 0);
             const statusLabel = container.status === 'on_po' ? 'On PO' : 'On the Way';
+            const shippingDraft = shippingDraftByContainerId[container.id] || {
+              containerNumber: container.containerNumber || '',
+              vesselIMO: container.vesselIMO || '',
+              destinationPort: container.destinationPort || '',
+            };
+            const shippingData = shippingDataByContainerId[container.id];
+            const shippingStatus = shippingData?.shippingStatus || container.shippingStatus || 'Unknown';
+            const shippingEta = shippingData?.etaIso || container.etaIso;
+            const shippingDestination = shippingData?.destinationPort || shippingDraft.destinationPort || container.destinationPort;
+            const shippingVesselName = shippingData?.vesselName || container.vesselName || container.shipName;
+            const shippingLastUpdated = shippingData?.lastUpdatedIso || container.lastUpdatedIso;
+            const shippingPosition = shippingData?.lastPosition || container.lastPosition;
+            const shippingOpen = Boolean(shippingOpenByContainerId[container.id]);
+            const shippingLoading = Boolean(shippingLoadingByContainerId[container.id]);
+            const shippingError = shippingErrorByContainerId[container.id];
+            const mapUrl = getMarineTrafficMapUrl({
+              ...container,
+              vesselIMO: shippingDraft.vesselIMO,
+              containerNumber: shippingDraft.containerNumber,
+            });
             return (
               <div key={container.id} className="rounded-lg border border-slate-200 p-3 space-y-2">
                 <div className="flex items-start justify-between gap-2">
@@ -856,6 +976,143 @@ const ContainerPlanner: React.FC<Props> = ({ onDataChanged }) => {
                         <span className="font-semibold">{line.pallets} pl</span>
                       </div>
                     ))}
+                  </div>
+                )}
+
+                {/* Existing container detail panel integration: shipping tracker lives inside this side panel card. */}
+                <button
+                  type="button"
+                  onClick={() => toggleShippingTracker(container)}
+                  className="w-full px-2 py-1.5 border border-slate-200 bg-slate-50 text-slate-700 rounded-lg text-xs font-semibold hover:bg-slate-100 flex items-center justify-between"
+                >
+                  <span>Shipping Tracker</span>
+                  {shippingOpen ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
+                </button>
+
+                {shippingOpen && (
+                  <div className="rounded-lg border border-slate-200 p-2 space-y-2">
+                    <div className="grid grid-cols-2 gap-2 text-[11px] text-slate-600">
+                      <div>
+                        <div className="text-slate-400">Container</div>
+                        <div className="font-semibold text-slate-700">{shippingDraft.containerNumber || '—'}</div>
+                      </div>
+                      <div>
+                        <div className="text-slate-400">Status</div>
+                        <div className="font-semibold text-slate-700">{shippingStatus}</div>
+                      </div>
+                      <div className="col-span-2">
+                        <div className="text-slate-400">Vessel</div>
+                        <div className="font-semibold text-slate-700">
+                          {shippingVesselName || '—'}
+                          {shippingDraft.vesselIMO ? ` (${shippingDraft.vesselIMO})` : ''}
+                        </div>
+                      </div>
+                      <div className="col-span-2">
+                        <div className="text-slate-400">Destination</div>
+                        <div className="font-semibold text-slate-700">{shippingDestination || '—'}</div>
+                      </div>
+                      <div>
+                        <div className="text-slate-400">ETA</div>
+                        <div className="font-semibold text-slate-700">{fmtIsoDateTime(shippingEta)}</div>
+                      </div>
+                      <div>
+                        <div className="text-slate-400">Last Updated</div>
+                        <div className="font-semibold text-slate-700">{fmtIsoDateTime(shippingLastUpdated)}</div>
+                      </div>
+                      {shippingPosition && (
+                        <div className="col-span-2">
+                          <div className="text-slate-400">Last Position</div>
+                          <div className="font-semibold text-slate-700">
+                            {shippingPosition.lat.toFixed(4)}, {shippingPosition.lon.toFixed(4)}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+
+                    <div className="grid grid-cols-1 gap-2 border-t border-slate-100 pt-2">
+                      <input
+                        type="text"
+                        value={shippingDraft.containerNumber}
+                        onChange={e => setShippingDraftByContainerId(prev => ({
+                          ...prev,
+                          [container.id]: {
+                            ...shippingDraft,
+                            containerNumber: e.target.value,
+                          },
+                        }))}
+                        className="w-full px-2 py-1.5 border rounded-lg text-xs"
+                        placeholder="Container number (e.g. MSKU1234567)"
+                      />
+                      <input
+                        type="text"
+                        value={shippingDraft.vesselIMO}
+                        onChange={e => setShippingDraftByContainerId(prev => ({
+                          ...prev,
+                          [container.id]: {
+                            ...shippingDraft,
+                            vesselIMO: e.target.value,
+                          },
+                        }))}
+                        className="w-full px-2 py-1.5 border rounded-lg text-xs"
+                        placeholder="Vessel IMO"
+                      />
+                      <input
+                        type="text"
+                        value={shippingDraft.destinationPort}
+                        onChange={e => setShippingDraftByContainerId(prev => ({
+                          ...prev,
+                          [container.id]: {
+                            ...shippingDraft,
+                            destinationPort: e.target.value,
+                          },
+                        }))}
+                        className="w-full px-2 py-1.5 border rounded-lg text-xs"
+                        placeholder="Destination port"
+                      />
+                    </div>
+
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                      <button
+                        type="button"
+                        onClick={() => void saveShippingIdentifiers(container)}
+                        disabled={savingShippingContainerId === container.id}
+                        className="px-2 py-1.5 rounded-lg bg-green-600 text-white text-xs font-semibold hover:bg-green-700 disabled:opacity-60"
+                      >
+                        {savingShippingContainerId === container.id ? 'Saving...' : 'Save'}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => void loadShippingData({
+                          ...container,
+                          containerNumber: shippingDraft.containerNumber,
+                          vesselIMO: shippingDraft.vesselIMO,
+                          destinationPort: shippingDraft.destinationPort,
+                        }, true)}
+                        disabled={shippingLoading}
+                        className="px-2 py-1.5 rounded-lg border border-slate-200 text-slate-700 text-xs font-semibold hover:bg-slate-50 flex items-center justify-center gap-1"
+                      >
+                        {shippingLoading ? (
+                          <span className="w-3.5 h-3.5 border-2 border-slate-300 border-t-blue-600 rounded-full animate-spin" />
+                        ) : (
+                          <RefreshCw size={12} />
+                        )}
+                        Refresh
+                      </button>
+                      <a
+                        href={mapUrl}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="px-2 py-1.5 rounded-lg border border-slate-200 text-slate-700 text-xs font-semibold hover:bg-slate-50 flex items-center justify-center gap-1"
+                      >
+                        <ExternalLink size={12} /> View on map
+                      </a>
+                    </div>
+
+                    {shippingError && (
+                      <div className="text-xs text-red-600 bg-red-50 border border-red-200 rounded-lg px-2 py-1.5">
+                        {shippingError}
+                      </div>
+                    )}
                   </div>
                 )}
 
